@@ -1,0 +1,54 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ai_cloud_ide_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+        
+    - name: Install Dependencies
+      working-directory: ./backend
+      run: npm install
+      
+    - name: Push Prisma Schema
+      working-directory: ./backend
+      env:
+        DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/ai_cloud_ide_test"
+      run: npx prisma db push
+      
+    - name: Run Tests
+      working-directory: ./backend
+      env:
+        NODE_ENV: test
+        TEST_DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/ai_cloud_ide_test"
+        JWT_SECRET: "test_jwt_secret"
+      run: npm test

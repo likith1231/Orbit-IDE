@@ -1,0 +1,54 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "db.js",
+  "scripts": {
+    "test": "jest",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/genai": "^2.10.0",
+    "@google/generative-ai": "^0.24.1",
+    "@prisma/client": "^6.19.3",
+    "axios": "^1.18.1",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dockerode": "^5.0.1",
+    "dotenv": "^17.4.2",
+    "eslint": "^10.6.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "jsonwebtoken": "^9.0.3",
+    "node-pty": "^1.1.0",
+    "pg": "^8.22.0",
+    "prisma": "^6.19.3",
+    "socket.io": "^4.8.3",
+    "sqlite3": "^6.0.1",
+    "ws": "^8.21.0",
+    "y-websocket": "^1.5.0",
+    "yjs": "^13.6.31",
+    "zod": "^4.4.3"
+  },
+  "allowScripts": {
+    "cpu-features@0.0.10": true,
+    "node-pty@1.1.0": true,
+    "protobufjs@7.6.4": true,
+    "ssh2@1.17.0": true,
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "prisma@6.19.3": true
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
+    "@types/supertest": "^7.2.0",
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.4.11"
+  }
+}

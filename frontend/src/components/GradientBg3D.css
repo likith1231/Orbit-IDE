@@ -1,0 +1,108 @@
+.gradient-bg-3d {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, #0a0c1a 0%, #0f1429 20%, #1a0f2e 40%, #0f1e2e 60%, #0a1420 80%, #050810 100%);
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.gradient-bg-3d::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: 
+    radial-gradient(circle at 15% 30%, rgba(139, 92, 246, 0.15) 0%, transparent 35%),
+    radial-gradient(circle at 85% 70%, rgba(59, 130, 246, 0.12) 0%, transparent 40%),
+    radial-gradient(circle at 50% 50%, rgba(34, 197, 94, 0.08) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.gradient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  opacity: 0.5;
+  animation: float 15s ease-in-out infinite;
+  mix-blend-mode: screen;
+}
+
+.gradient-orb-1 {
+  width: 800px;
+  height: 800px;
+  background: radial-gradient(circle, rgba(147, 112, 219, 0.35), rgba(139, 92, 246, 0.15), transparent 70%);
+  top: -300px;
+  left: -200px;
+  animation-duration: 22s;
+}
+
+.gradient-orb-2 {
+  width: 700px;
+  height: 700px;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.3), rgba(30, 144, 255, 0.1), transparent 70%);
+  bottom: -250px;
+  right: -150px;
+  animation-duration: 28s;
+  animation-delay: 5s;
+}
+
+.gradient-orb-3 {
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.25), rgba(16, 185, 129, 0.08), transparent 70%);
+  top: 35%;
+  right: 5%;
+  animation-duration: 25s;
+  animation-delay: 10s;
+}
+
+.gradient-glow {
+  position: absolute;
+  inset: 0;
+  background: 
+    radial-gradient(ellipse at 50% 50%, rgba(88, 28, 135, 0.1) 0%, transparent 40%),
+    linear-gradient(180deg, transparent 0%, rgba(15, 23, 42, 0.4) 100%);
+  pointer-events: none;
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translate(0, 0) scale(1) rotate(0deg);
+  }
+  25% {
+    transform: translate(50px, -60px) scale(1.08) rotate(45deg);
+  }
+  50% {
+    transform: translate(-30px, 40px) scale(0.92) rotate(-45deg);
+  }
+  75% {
+    transform: translate(60px, 20px) scale(1.05) rotate(90deg);
+  }
+}
+
+@media (max-width: 768px) {
+  .gradient-orb {
+    filter: blur(70px);
+  }
+
+  .gradient-orb-1 {
+    width: 400px;
+    height: 400px;
+    top: -150px;
+    left: -100px;
+  }
+
+  .gradient-orb-2 {
+    width: 350px;
+    height: 350px;
+    bottom: -120px;
+    right: -80px;
+  }
+
+  .gradient-orb-3 {
+    width: 300px;
+    height: 300px;
+  }
+}
