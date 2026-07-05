@@ -379,14 +379,14 @@ export default function IDE() {
   }, [codeFont]);
 
   const fetchProjects = useCallback(async () => {
-    const res = await fetch('http://localhost:5000/api/projects', { headers: authHeader() });
+    const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects`, { headers: authHeader() });
     const data = await res.json();
     setProjects(data.projects || []);
     return data.projects || [];
   }, []);
 
   const loadProject = useCallback(async (projectId) => {
-    const res = await fetch(`http://localhost:5000/api/projects/${projectId}`, { headers: authHeader() });
+    const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${projectId}`, { headers: authHeader() });
     const data = await res.json();
     setProject(data.project);
     setAllFiles(data.project.files);
@@ -548,7 +548,7 @@ export default function IDE() {
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch('http://localhost:5000/api/containers/list');
+        const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/containers/list`);
         const data = await res.json();
         setContainers(data.containers || []);
         setDockerStatus(data.containers?.filter(c => c.State === 'running').length ? 'running' : 'idle');
@@ -626,7 +626,7 @@ export default function IDE() {
     setChatLoading(true);
     setChatMessages(m => [...m, { role: 'user', content: `Optimize ${file.name} for readability and performance.` }]);
     try {
-      const res = await fetch('http://localhost:5000/api/ai/chat', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: [{ role: 'user', content: `Optimize this ${file.language} file for readability and performance. Return the complete improved file.` }],
@@ -721,8 +721,8 @@ export default function IDE() {
     const action = state === 'running' ? 'stop' : 'start';
     setContainerAction(id);
     try {
-      await fetch(`http://localhost:5000/api/containers/${id}/${action}`, { method: 'POST' });
-      const res = await fetch('http://localhost:5000/api/containers/list');
+      await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/containers/${id}/${action}`, { method: 'POST' });
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/containers/list`);
       const data = await res.json();
       setContainers(data.containers || []);
     } catch {
@@ -800,7 +800,7 @@ export default function IDE() {
     }
 
     try {
-      await fetch(`http://localhost:5000/api/projects/${project.id}/files/${fileId}`, {
+      await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${fileId}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ content: finalContent }),
       });
@@ -816,11 +816,11 @@ export default function IDE() {
   const refreshGit = useCallback(async () => {
     if (!project) return;
     try {
-      const statusRes = await fetch(`http://localhost:5000/api/projects/${project.id}/git/status`, { headers: authHeader() });
+      const statusRes = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/git/status`, { headers: authHeader() });
       const statusData = await statusRes.json();
       setGitStatus(statusData.status || '');
 
-      const logRes = await fetch(`http://localhost:5000/api/projects/${project.id}/git/log`, { headers: authHeader() });
+      const logRes = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/git/log`, { headers: authHeader() });
       const logData = await logRes.json();
       setGitLogs(logData.logs || []);
     } catch (e) { console.error('Git error', e); }
@@ -830,7 +830,7 @@ export default function IDE() {
     if (!project || !gitCommitMsg.trim()) return;
     setIsGitLoading(true);
     try {
-      await fetch(`http://localhost:5000/api/projects/${project.id}/git/commit`, {
+      await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/git/commit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ message: gitCommitMsg })
       });
@@ -858,7 +858,7 @@ export default function IDE() {
       clearTimeout(lintTimeout.current);
       lintTimeout.current = setTimeout(async () => {
         try {
-          const res = await fetch(`http://localhost:5000/api/projects/${project.id}/lint`, {
+          const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/lint`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...authHeader() },
             body: JSON.stringify({ code: value })
@@ -889,7 +889,7 @@ export default function IDE() {
 
   const refreshTree = useCallback(async () => {
     if (!project) return;
-    const res = await fetch(`http://localhost:5000/api/projects/${project.id}`, { headers: authHeader() });
+    const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}`, { headers: authHeader() });
     const data = await res.json();
     setAllFiles(data.project.files);
   }, [project]);
@@ -898,7 +898,7 @@ export default function IDE() {
     if (!sandboxId) return;
     xtermRef.current?.writeln('\r\n\x1b[33m► Stopping sandbox...\x1b[0m');
     try {
-      await fetch('http://localhost:5000/api/run/stop', {
+      await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/run/stop`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ containerId: sandboxId })
       });
@@ -947,7 +947,7 @@ export default function IDE() {
         content: f.isFolder ? '' : (openFiles[f.id]?.value ?? f.content)
       }));
 
-      const res = await fetch('http://localhost:5000/api/run', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/run`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name, projectFiles, socketId: socketRef.current?.id }),
       });
@@ -1020,7 +1020,7 @@ export default function IDE() {
   const autoDebug = async (file: any, errorOutput: string, attempt: number) => {
     setChatMessages(m => [...m, { role: 'assistant', content: `⚠ Detected an error in ${file.name} (Attempt ${attempt}/3). Asking AI to auto-fix using the real error output...` }]);
     try {
-      const res = await fetch('http://localhost:5000/api/ai/debug', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/debug`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name, error: errorOutput }),
       });
@@ -1028,7 +1028,7 @@ export default function IDE() {
       if (data.scaffold) {
         setChatMessages(m => [...m, { role: 'assistant', content: `✔ Auto-fixing by scaffolding dependencies.\n${data.explanation ? '\n' + data.explanation : ''}` }]);
         setDebugHistory(h => [...h, { attempt, file: file.name, error: errorOutput, explanation: data.explanation, status: 'testing' }]);
-        await fetch(`http://localhost:5000/api/projects/${project?.id}/scaffold`, {
+        await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project?.id}/scaffold`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
           body: JSON.stringify({ items: data.scaffold }),
         });
@@ -1055,7 +1055,7 @@ export default function IDE() {
     if (!file) return;
     setIsChaosRunning(true); setChaosResults(null); setBottomTab('chaos');
     try {
-      const res = await fetch('http://localhost:5000/api/chaos', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chaos`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name }),
       });
@@ -1078,7 +1078,7 @@ export default function IDE() {
     try {
       if (action === 'scaffold') {
         setChatMessages(m => [...m, { role: 'assistant', content: summary || `Applying ${data.items.length} files...` }]);
-        const res2 = await fetch(`http://localhost:5000/api/projects/${project.id}/scaffold`, {
+        const res2 = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/scaffold`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
           body: JSON.stringify({ items: data.items }),
         });
@@ -1115,7 +1115,7 @@ export default function IDE() {
         for (const filename of data.items) {
           const target = allFiles.find(f => (f.path ? f.path + '/' : '') + f.name === filename || f.name === filename);
           if (target) {
-            await fetch(`http://localhost:5000/api/projects/${project.id}/files/${target.id}`, { method: 'DELETE', headers: authHeader() });
+            await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${target.id}`, { method: 'DELETE', headers: authHeader() });
             setOpenFiles(f => { const n = { ...f }; delete n[target.id]; return n; });
             setOpenTabs(t => t.filter(x => x !== target.id));
             if (activeFile === target.id) setActiveFile(null);
@@ -1137,7 +1137,7 @@ export default function IDE() {
   const loadChatSessions = useCallback(async () => {
     if (!project) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/projects/${project.id}/chats`, { headers: authHeader() });
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/chats`, { headers: authHeader() });
       if (res.ok) {
         const data = await res.json();
         setChatSessions(data.sessions);
@@ -1148,7 +1148,7 @@ export default function IDE() {
   const loadChatMessages = useCallback(async (sessionId: string) => {
     if (!sessionId) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/chats/${sessionId}/messages`, { headers: authHeader() });
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${sessionId}/messages`, { headers: authHeader() });
       if (res.ok) {
         const data = await res.json();
         const msgs = data.messages.map((m: any) => ({ role: m.role, content: m.content }));
@@ -1160,7 +1160,7 @@ export default function IDE() {
   const createNewChat = async () => {
     if (!project) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/projects/${project.id}/chats`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/chats`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name: 'New Chat' })
@@ -1177,7 +1177,7 @@ export default function IDE() {
   const deleteChat = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      const res = await fetch(`http://localhost:5000/api/chats/${id}`, { method: 'DELETE', headers: authHeader() });
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${id}`, { method: 'DELETE', headers: authHeader() });
       if (res.ok) {
         setChatSessions(prev => prev.filter(s => s.id !== id));
         if (activeSessionId === id) {
@@ -1190,7 +1190,7 @@ export default function IDE() {
 
   const renameChat = async (id: string, newName: string) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/chats/${id}`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name: newName })
@@ -1216,7 +1216,7 @@ export default function IDE() {
 
   const saveMessageToDb = async (sessionId: string, role: string, content: string) => {
     try {
-      await fetch(`http://localhost:5000/api/chats/${sessionId}/messages`, {
+      await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${sessionId}/messages`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ role, content })
       });
@@ -1230,7 +1230,7 @@ export default function IDE() {
     let currentSessionId = activeSessionId;
     if (!currentSessionId && project) {
       try {
-        const res = await fetch(`http://localhost:5000/api/projects/${project.id}/chats`, {
+        const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/chats`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
           body: JSON.stringify({ name: chatInput.slice(0, 30) + (chatInput.length > 30 ? '...' : '') })
         });
@@ -1254,7 +1254,7 @@ export default function IDE() {
     const fileTree = allFiles.map(f => ({ name: f.name, path: f.path, isFolder: f.isFolder }));
     const activeFileData = activeFile ? openFiles[activeFile] : null;
     try {
-      const res = await fetch('http://localhost:5000/api/ai/chat', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         signal: abortControllerRef.current.signal,
         body: JSON.stringify({
@@ -1300,7 +1300,7 @@ export default function IDE() {
     const name = newItemName.trim();
     if (!name || !project) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/projects/${project.id}/files`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name, path: '', isFolder, language: getLang(name) }),
       });
@@ -1314,7 +1314,7 @@ export default function IDE() {
 
   const deleteItem = async (id, name, isFolder) => {
     if (!window.confirm(`Delete ${isFolder ? 'folder' : 'file'} "${name}"${isFolder ? ' and everything inside?' : '?'}`)) return;
-    await fetch(`http://localhost:5000/api/projects/${project.id}/files/${id}`, { method: 'DELETE', headers: authHeader() });
+    await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${id}`, { method: 'DELETE', headers: authHeader() });
     await refreshTree();
     if (!isFolder) {
       setOpenFiles(f => { const n = { ...f }; delete n[id]; return n; });
@@ -1327,7 +1327,7 @@ export default function IDE() {
   const handleReplaceAll = async () => {
     if (!project || !searchQuery) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/projects/${project.id}/replace`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/replace`, {
         method: 'POST',
         headers: authHeader(),
         body: JSON.stringify({ q: searchQuery, replaceWith: replaceQuery })
@@ -1347,7 +1347,7 @@ export default function IDE() {
     const newName = renameValue.trim();
     setRenamingFile(null);
     if (!newName) return;
-    const res = await fetch(`http://localhost:5000/api/projects/${project.id}/files/${id}`, {
+    const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader() },
       body: JSON.stringify({ name: newName }),
     });
@@ -1364,7 +1364,7 @@ export default function IDE() {
   const createProject = async () => {
     const name = newProjectName.trim();
     if (!name) return;
-    const res = await fetch('http://localhost:5000/api/projects', {
+    const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
       body: JSON.stringify({ name }),
     });
@@ -1379,7 +1379,7 @@ export default function IDE() {
     if (!project) return;
     setDeployState('deploying');
     try {
-      const res = await fetch(`http://localhost:5000/api/projects/${project.id}/deploy`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/deploy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() }
       });
@@ -1397,7 +1397,7 @@ export default function IDE() {
   const handleStopDeploy = async () => {
     if (!project || !deployContainerId) return;
     try {
-      await fetch(`http://localhost:5000/api/projects/${project.id}/stop-deploy`, {
+      await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/stop-deploy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ containerId: deployContainerId })
@@ -1415,7 +1415,7 @@ export default function IDE() {
     e.stopPropagation();
     if (!window.confirm("Are you sure you want to delete this project? This cannot be undone.")) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/projects/${id}`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${id}`, {
         method: 'DELETE',
         headers: authHeader()
       });
@@ -1440,7 +1440,7 @@ export default function IDE() {
       const name = dirHandle.name;
 
       // Create project
-      const res = await fetch('http://localhost:5000/api/projects', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name }),
       });
@@ -1461,7 +1461,7 @@ export default function IDE() {
 
       // Upload files (one by one for simplicity)
       for (const f of newFiles) {
-        await fetch(`http://localhost:5000/api/projects/${projectId}/files`, {
+        await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${projectId}/files`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
           body: JSON.stringify(f)
         });
@@ -1984,7 +1984,7 @@ export default function IDE() {
                                 const suffix = text.substring(offset);
 
                                 try {
-                                  const res = await fetch('http://localhost:5000/api/ai/autocomplete', {
+                                  const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/autocomplete`, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ prefix, suffix, language: model.getLanguageId() }),
