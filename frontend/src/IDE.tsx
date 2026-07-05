@@ -13,11 +13,11 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Files, Search, Boxes, ChevronRight, ChevronDown, LogOut, Send, Command, Plus, FolderPlus, Trash2, Play, Pencil, Folder, FolderOpen, Zap, Bug, Minus, Settings, GitBranch, Layers, Square, RefreshCw, Database, Rocket, ExternalLink, Code, Terminal as TerminalIcon, X, ChevronRight as ChevronRightIcon, Cpu, Activity, ShieldAlert, FileText, Download, Check, Menu, Edit2, MessageSquare } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import Fuse from 'fuse.js';
-import { 
-  SiJavascript, SiTypescript, SiReact, SiPython, 
-  SiC, SiCplusplus, SiGo, SiRust, SiRuby, 
-  SiPhp, SiGnubash, SiLua, SiR, SiMarkdown, SiJson, 
-  SiCss, SiHtml5 
+import {
+  SiJavascript, SiTypescript, SiReact, SiPython,
+  SiC, SiCplusplus, SiGo, SiRust, SiRuby,
+  SiPhp, SiGnubash, SiLua, SiR, SiMarkdown, SiJson,
+  SiCss, SiHtml5
 } from 'react-icons/si';
 import { FaJava, FaFileAlt } from 'react-icons/fa';
 import { TbBrandCSharp } from 'react-icons/tb';
@@ -425,7 +425,7 @@ export default function IDE() {
     const ytext = ydoc.getText('monaco');
     const model = editor.getModel();
     if (!model) return;
-    
+
     // Wait for the initial sync from the server before binding Monaco,
     // so that the editor isn't wiped by an initially empty local ytext.
     provider.on('synced', () => {
@@ -449,7 +449,7 @@ export default function IDE() {
 
   useEffect(() => {
     if (!terminalRef.current) return;
-    socketRef.current = io('http://localhost:5000');
+    socketRef.current = io(import.meta.env.VITE_API_URL || 'http://localhost:5000');
 
     const primary = createTerminalInstance(terminalRef.current, true);
     xtermRef.current = primary.term;
@@ -567,7 +567,7 @@ export default function IDE() {
       if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); setGotoLineOpen(true); setGotoLineValue(''); }
       if (e.key === 'Escape') { setPaletteOpen(false); setRenamingFile(null); setShowProjectPicker(false); setGotoLineOpen(false); }
       if (mod && e.key === 's') { e.preventDefault(); if (activeFile && openFiles[activeFile]) { saveFile(activeFile, openFiles[activeFile].value); } }
-      if (mod && e.key === 'w') { e.preventDefault(); if (activeFile) closeTab(activeFile, { stopPropagation: () => {} }); }
+      if (mod && e.key === 'w') { e.preventDefault(); if (activeFile) closeTab(activeFile, { stopPropagation: () => { } }); }
       if (mod && e.key === '`') { e.preventDefault(); setBottomTab('terminal'); }
     };
     window.addEventListener('keydown', handler);
@@ -761,7 +761,7 @@ export default function IDE() {
   const saveFile = useCallback(async (fileId: string | null, content: string) => {
     if (!project || !fileId) return;
     setSaveStatus('saving');
-    
+
     let finalContent = content;
     if (extensionStates['prettier']) {
       try {
@@ -771,7 +771,7 @@ export default function IDE() {
           let plugins: any[] = [];
           let parser = '';
           const ext = file.name.split('.').pop()?.toLowerCase();
-          
+
           if (ext === 'js' || ext === 'jsx' || ext === 'ts' || ext === 'tsx') {
             plugins = [await import('prettier/plugins/babel'), await import('prettier/plugins/estree')];
             parser = 'babel';
@@ -788,7 +788,7 @@ export default function IDE() {
             plugins = [await import('prettier/plugins/markdown')];
             parser = 'markdown';
           }
-          
+
           if (parser) {
             finalContent = await prettier.format(content, { parser, plugins, singleQuote: true });
             if (finalContent !== content && activeFile === fileId) {
@@ -819,7 +819,7 @@ export default function IDE() {
       const statusRes = await fetch(`http://localhost:5000/api/projects/${project.id}/git/status`, { headers: authHeader() });
       const statusData = await statusRes.json();
       setGitStatus(statusData.status || '');
-      
+
       const logRes = await fetch(`http://localhost:5000/api/projects/${project.id}/git/log`, { headers: authHeader() });
       const logData = await logRes.json();
       setGitLogs(logData.logs || []);
@@ -882,8 +882,8 @@ export default function IDE() {
         }
       }, 1000);
     } else if (!extensionStates['eslint'] && editorRef.current && monacoRef.current) {
-       const model = editorRef.current.getModel();
-       if (model) monacoRef.current.editor.setModelMarkers(model, 'eslint', []);
+      const model = editorRef.current.getModel();
+      if (model) monacoRef.current.editor.setModelMarkers(model, 'eslint', []);
     }
   };
 
@@ -929,7 +929,7 @@ export default function IDE() {
       if (!f) return;
       file = { name: f.name, path: f.path, language: getLang(f.name), value: f.content };
     }
-    
+
     if (!isAutoRetry) {
       autoDebugAttempts.current = 0;
     }
@@ -946,16 +946,16 @@ export default function IDE() {
         isFolder: f.isFolder,
         content: f.isFolder ? '' : (openFiles[f.id]?.value ?? f.content)
       }));
-      
+
       const res = await fetch('http://localhost:5000/api/run', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name, projectFiles, socketId: socketRef.current?.id }),
       });
       const data = await res.json();
-      
+
       if (data.containerId) {
         setSandboxId(data.containerId);
-        
+
         if (isAutoRetry) {
           setDebugHistory(h => {
             const next = [...h];
@@ -963,7 +963,7 @@ export default function IDE() {
             return next;
           });
         }
-        
+
         if (data.mappedPorts && Object.keys(data.mappedPorts).length > 0) {
           setPreviewPorts(data.mappedPorts);
           xtermRef.current?.writeln(`\r\n\x1b[35m► App listening on mapped ports: ${JSON.stringify(data.mappedPorts)}\x1b[0m`);
@@ -980,7 +980,7 @@ export default function IDE() {
       } else if (data.error) {
         xtermRef.current?.writeln(`\r\n\x1b[31m✖ Sandbox error: ${data.error}\x1b[0m`);
         setIsRunning(false);
-        
+
         if (isAutoRetry) {
           setDebugHistory(h => {
             const next = [...h];
@@ -988,9 +988,9 @@ export default function IDE() {
             return next;
           });
         }
-        
+
         const isServerOrRateLimitError = res.status === 429 || res.status >= 500 || data.error.includes('Unsupported language');
-        
+
         if (autoDebugEnabled && !isServerOrRateLimitError) {
           if (autoDebugAttempts.current < 3) {
             autoDebugAttempts.current += 1;
@@ -1070,8 +1070,8 @@ export default function IDE() {
     console.log("Approve clicked", { pendingAIAction, project });
     if (!pendingAIAction) return;
     if (!project) {
-       alert("Project is not loaded properly. Please refresh the page.");
-       return;
+      alert("Project is not loaded properly. Please refresh the page.");
+      return;
     }
     const { action, data, summary } = pendingAIAction;
     setPendingAIAction(null);
@@ -1113,19 +1113,19 @@ export default function IDE() {
       } else if (action === 'delete') {
         setChatMessages(m => [...m, { role: 'assistant', content: summary || `Deleting ${data.items.length} files...` }]);
         for (const filename of data.items) {
-           const target = allFiles.find(f => (f.path ? f.path + '/' : '') + f.name === filename || f.name === filename);
-           if (target) {
-             await fetch(`http://localhost:5000/api/projects/${project.id}/files/${target.id}`, { method: 'DELETE', headers: authHeader() });
-             setOpenFiles(f => { const n = { ...f }; delete n[target.id]; return n; });
-             setOpenTabs(t => t.filter(x => x !== target.id));
-             if (activeFile === target.id) setActiveFile(null);
-           }
+          const target = allFiles.find(f => (f.path ? f.path + '/' : '') + f.name === filename || f.name === filename);
+          if (target) {
+            await fetch(`http://localhost:5000/api/projects/${project.id}/files/${target.id}`, { method: 'DELETE', headers: authHeader() });
+            setOpenFiles(f => { const n = { ...f }; delete n[target.id]; return n; });
+            setOpenTabs(t => t.filter(x => x !== target.id));
+            if (activeFile === target.id) setActiveFile(null);
+          }
         }
         await refreshTree();
         setChatMessages(m => [...m, { role: 'assistant', content: `✔ Deleted ${data.items.length} files/folders.` }]);
       }
     } catch {
-       setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Error applying AI changes.' }]);
+      setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Error applying AI changes.' }]);
     }
   };
 
@@ -1220,12 +1220,12 @@ export default function IDE() {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ role, content })
       });
-    } catch(e) {}
+    } catch (e) { }
   };
 
   const sendChatMessage = async () => {
     if (!chatInput.trim() || chatLoading) return;
-    
+
     // Auto-create session if none exists
     let currentSessionId = activeSessionId;
     if (!currentSessionId && project) {
@@ -1240,7 +1240,7 @@ export default function IDE() {
           setActiveSessionId(currentSessionId);
           setChatSessions(prev => [data.session, ...prev]);
         }
-      } catch(e) {}
+      } catch (e) { }
     }
 
     const userText = chatInput;
@@ -1248,7 +1248,7 @@ export default function IDE() {
 
     const nextMessages = [...chatMessages, { role: 'user', content: userText }];
     setChatMessages(nextMessages as any); setChatInput(''); setChatLoading(true);
-    
+
     abortControllerRef.current = new AbortController();
 
     const fileTree = allFiles.map(f => ({ name: f.name, path: f.path, isFolder: f.isFolder }));
@@ -1286,7 +1286,7 @@ export default function IDE() {
         setChatMessages(m => [...m, { role: 'assistant', content: aiMsg }]);
         if (currentSessionId) saveMessageToDb(currentSessionId, 'assistant', aiMsg);
       }
-    } catch(e: any) {
+    } catch (e: any) {
       if (e.name === 'AbortError') {
         setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Generation stopped by user.' }]);
         if (currentSessionId) saveMessageToDb(currentSessionId, 'assistant', '⚠ Generation stopped by user.');
@@ -1309,7 +1309,7 @@ export default function IDE() {
       setNewItemName(''); setShowNewItem(null);
       await refreshTree();
       if (!isFolder) openFile(data.file);
-    } catch {}
+    } catch { }
   };
 
   const deleteItem = async (id, name, isFolder) => {
@@ -1438,7 +1438,7 @@ export default function IDE() {
     try {
       const dirHandle = await (window as any).showDirectoryPicker();
       const name = dirHandle.name;
-      
+
       // Create project
       const res = await fetch('http://localhost:5000/api/projects', {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
@@ -1446,7 +1446,7 @@ export default function IDE() {
       });
       const data = await res.json();
       const projectId = data.project.id;
-      
+
       const newFiles = [];
       for await (const entry of dirHandle.values()) {
         if (entry.kind === 'file') {
@@ -1686,11 +1686,11 @@ export default function IDE() {
                   )}
 
                   <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <input 
-                      type="text" 
-                      className="search-input" 
-                      placeholder="Commit message..." 
-                      value={gitCommitMsg} 
+                    <input
+                      type="text"
+                      className="search-input"
+                      placeholder="Commit message..."
+                      value={gitCommitMsg}
                       onChange={e => setGitCommitMsg(e.target.value)}
                       onKeyDown={e => e.key === 'Enter' && commitGit()}
                       style={{ flex: 1 }}
@@ -1788,9 +1788,9 @@ export default function IDE() {
                       <div><Boxes size={14} /> {container.Names?.[0]?.replace(/^\//, '')}</div>
                       <div className="docker-badge">{container.State}</div>
                       <button className="toggle-btn" style={{ padding: '6px 10px', fontSize: 12 }}
-                          onClick={() => toggleContainer(container.Id, container.State)}
-                          disabled={containerAction === container.Id || dockerStatus === 'error'}>
-                          {containerAction === container.Id ? '...' : container.State === 'running' ? 'Stop' : 'Start'}
+                        onClick={() => toggleContainer(container.Id, container.State)}
+                        disabled={containerAction === container.Id || dockerStatus === 'error'}>
+                        {containerAction === container.Id ? '...' : container.State === 'running' ? 'Stop' : 'Start'}
                       </button>
                     </div>
                   ))}
@@ -1874,7 +1874,7 @@ export default function IDE() {
               <div className="welcome-screen" style={{ padding: '10%', height: '100%', overflowY: 'auto', background: '#1e1e1e', color: '#cccccc' }}>
                 <h1 style={{ fontSize: 36, fontWeight: 300, color: '#ffffff', marginBottom: 4 }}>Orbit IDE</h1>
                 <p style={{ fontSize: 18, color: '#888', marginBottom: 40 }}>Editing evolved</p>
-                
+
                 <div style={{ display: 'flex', gap: 60, flexWrap: 'wrap' }}>
                   <div style={{ flex: 1, minWidth: 250, maxWidth: 400 }}>
                     <h2 style={{ fontSize: 13, textTransform: 'uppercase', color: '#ccc', marginBottom: 16 }}>Start</h2>
@@ -1895,7 +1895,7 @@ export default function IDE() {
                       {projects.length === 0 && <span style={{ color: '#666', fontSize: 13 }}>No recent projects.</span>}
                     </div>
                   </div>
-                  
+
                   <div style={{ flex: 1, minWidth: 250 }}>
                     <h2 style={{ fontSize: 13, textTransform: 'uppercase', color: '#ccc', marginBottom: 16 }}>Walkthroughs</h2>
                     <div className="welcome-walkthrough" onClick={() => alert('Welcome to Orbit IDE! Stay tuned for interactive tutorials.')}>
@@ -1909,39 +1909,39 @@ export default function IDE() {
                 </div>
               </div>
             ) : (
-            <PanelGroup direction="vertical">
-              <Panel defaultSize={70} minSize={20} style={{ display: 'flex', flexDirection: 'column' }}>
-                <div className="tabs-bar">
-                  {openTabs.map(id => (
-                    <div key={id} className={`tab ${activeFile === id ? 'active' : ''}`} onClick={() => setActiveFile(id)}>
-                      {id === '__preview__' ? (
-                        <><span className="file-icon-emoji">🌐</span> Preview</>
-                      ) : (
-                        <><span className="file-icon-emoji">{fileIcon(openFiles[id]?.name || '')}</span> {openFiles[id]?.name}</>
-                      )}
-                      <span className="tab-close" onClick={e => closeTab(id, e)}>✕</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="breadcrumb">
-                  <span>{project?.name}</span><ChevronRight size={12} />
-                  <span>{activeFileData?.path ? activeFileData.path + '/' : ''}{activeFileData?.name}</span>
-                  <div style={{ flex: 1 }} />
-                  {Object.keys(previewPorts).length > 0 && (
-                    <button className={`toggle-btn ${activeFile === '__preview__' ? 'on' : ''}`} style={{ padding: '4px 8px', fontSize: 11 }} onClick={() => {
-                      if (!openTabs.includes('__preview__')) setOpenTabs([...openTabs, '__preview__']);
-                      setActiveFile('__preview__');
-                    }}>
-                      Browser Preview
-                    </button>
-                  )}
-                </div>
-                <div className="editor-container" style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+              <PanelGroup direction="vertical">
+                <Panel defaultSize={70} minSize={20} style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div className="tabs-bar">
+                    {openTabs.map(id => (
+                      <div key={id} className={`tab ${activeFile === id ? 'active' : ''}`} onClick={() => setActiveFile(id)}>
+                        {id === '__preview__' ? (
+                          <><span className="file-icon-emoji">🌐</span> Preview</>
+                        ) : (
+                          <><span className="file-icon-emoji">{fileIcon(openFiles[id]?.name || '')}</span> {openFiles[id]?.name}</>
+                        )}
+                        <span className="tab-close" onClick={e => closeTab(id, e)}>✕</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="breadcrumb">
+                    <span>{project?.name}</span><ChevronRight size={12} />
+                    <span>{activeFileData?.path ? activeFileData.path + '/' : ''}{activeFileData?.name}</span>
+                    <div style={{ flex: 1 }} />
+                    {Object.keys(previewPorts).length > 0 && (
+                      <button className={`toggle-btn ${activeFile === '__preview__' ? 'on' : ''}`} style={{ padding: '4px 8px', fontSize: 11 }} onClick={() => {
+                        if (!openTabs.includes('__preview__')) setOpenTabs([...openTabs, '__preview__']);
+                        setActiveFile('__preview__');
+                      }}>
+                        Browser Preview
+                      </button>
+                    )}
+                  </div>
+                  <div className="editor-container" style={{ flex: 1, position: 'relative', minHeight: 0 }}>
                     {activeFile === '__preview__' ? (
                       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#fff' }}>
                         <div style={{ padding: '6px 12px', background: '#f1f1f1', borderBottom: '1px solid #ddd', display: 'flex', gap: 8, alignItems: 'center' }}>
                           <span style={{ color: '#333', fontSize: 12, fontWeight: 600 }}>Browser Preview</span>
-                          <select 
+                          <select
                             style={{ fontSize: 11, padding: '2px 4px', border: '1px solid #ccc', borderRadius: 4, flex: 1 }}
                             onChange={(e) => {
                               const iframe = document.getElementById('preview-iframe') as HTMLIFrameElement;
@@ -1957,10 +1957,10 @@ export default function IDE() {
                             if (iframe) iframe.src = iframe.src;
                           }}>↻</button>
                         </div>
-                        <iframe 
+                        <iframe
                           id="preview-iframe"
-                          src={`http://localhost:${previewPorts['8080/tcp'] || previewPorts['3000/tcp'] || Object.values(previewPorts)[0]}`} 
-                          style={{ flex: 1, width: '100%', border: 'none', background: '#fff' }} 
+                          src={`http://localhost:${previewPorts['8080/tcp'] || previewPorts['3000/tcp'] || Object.values(previewPorts)[0]}`}
+                          style={{ flex: 1, width: '100%', border: 'none', background: '#fff' }}
                         />
                       </div>
                     ) : activeFileData ? (
@@ -1971,7 +1971,7 @@ export default function IDE() {
                           editorRef.current = editor;
                           monacoRef.current = monaco;
                           bindYjs(editor, monaco, activeFile);
-                          
+
                           if (!(window as any).__monacoAutocompleteRegistered) {
                             (window as any).__monacoAutocompleteRegistered = true;
                             monaco.languages.registerInlineCompletionsProvider('*', {
@@ -1982,7 +1982,7 @@ export default function IDE() {
                                 const offset = model.getOffsetAt(position);
                                 const prefix = text.substring(0, offset);
                                 const suffix = text.substring(offset);
-                                
+
                                 try {
                                   const res = await fetch('http://localhost:5000/api/ai/autocomplete', {
                                     method: 'POST',
@@ -1999,10 +1999,10 @@ export default function IDE() {
                                       }]
                                     };
                                   }
-                                } catch (e) {}
+                                } catch (e) { }
                                 return { items: [] };
                               },
-                              freeInlineCompletions: (completions) => {}
+                              freeInlineCompletions: (completions) => { }
                             });
                           }
 
@@ -2023,290 +2023,290 @@ export default function IDE() {
                         <div style={{ fontSize: 11, marginTop: 16, color: '#555' }}>Ctrl+Shift+P — Command Palette</div>
                       </div>
                     )}
-                </div>
-              </Panel>
-              <PanelResizeHandle className="resize-handle horizontal" />
-              <Panel defaultSize={30} minSize={15}>
-                <div className="bottom-tabs">
-                  <span className={`bottom-tab ${bottomTab === 'terminal' ? 'active' : ''}`} onClick={() => setBottomTab('terminal')}>TERMINAL</span>
-                  <span className={`bottom-tab ${bottomTab === 'problems' ? 'active' : ''}`} onClick={() => setBottomTab('problems')}>
-                    PROBLEMS {(errorCount > 0 || warnCount > 0) && <span className="problem-badge" style={{ background: errorCount > 0 ? '#f44336' : '#e3b341' }}>{errorCount + warnCount}</span>}
-                  </span>
-                  <span className={`bottom-tab ${bottomTab === 'output' ? 'active' : ''}`} onClick={() => setBottomTab('output')}>OUTPUT</span>
-                  <span className={`bottom-tab ${bottomTab === 'chaos' ? 'active' : ''}`} onClick={() => setBottomTab('chaos')}>
-                    CHAOS {chaosResults && <span className="problem-badge" style={{ background: chaosResults.resilienceScore >= 70 ? '#2ea043' : '#e3b341' }}>{chaosResults.resilienceScore}%</span>}
-                  </span>
-                </div>
-                <div className="terminal-panel" style={{ display: bottomTab === 'terminal' ? 'flex' : 'none' }}>
-                  <div className="terminal-command-row">
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <button className="icon-btn" title="New Terminal" onClick={newTerminal}>New</button>
-                      <button className="icon-btn" title="Split Terminal" onClick={splitTerminal}>{isSplit ? 'Unsplit' : 'Split'}</button>
-                      <button className="icon-btn" title="Kill Terminal" onClick={killTerminal}>Kill</button>
-                      <button className="icon-btn" title="Clear Terminal" onClick={clearTerminal}>Clear</button>
-                      <button className="icon-btn" title="Switch shell" onClick={toggleTerminalMode}>Mode: {terminalMode}</button>
-                    </div>
-                    <input
-                      className="terminal-command-input"
-                      value={terminalCommand}
-                      onChange={e => setTerminalCommand(e.target.value)}
-                      onKeyDown={handleTerminalCommandKeyDown}
-                      placeholder="Run commands: help, run, open app.js, search foo, toggle minimap"
-                    />
-                    <button className="icon-btn" title="Execute command" onClick={executeTerminalCommand}>Run</button>
                   </div>
-                  <div className="terminal-split" style={{ display: 'flex', gap: 8, flex: 1, minHeight: 0, overflow: 'hidden' }}>
-                    <div ref={terminalRef} className="terminal-host" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }} />
-                    {isSplit && <div ref={splitRef} className="terminal-host" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }} />}
+                </Panel>
+                <PanelResizeHandle className="resize-handle horizontal" />
+                <Panel defaultSize={30} minSize={15}>
+                  <div className="bottom-tabs">
+                    <span className={`bottom-tab ${bottomTab === 'terminal' ? 'active' : ''}`} onClick={() => setBottomTab('terminal')}>TERMINAL</span>
+                    <span className={`bottom-tab ${bottomTab === 'problems' ? 'active' : ''}`} onClick={() => setBottomTab('problems')}>
+                      PROBLEMS {(errorCount > 0 || warnCount > 0) && <span className="problem-badge" style={{ background: errorCount > 0 ? '#f44336' : '#e3b341' }}>{errorCount + warnCount}</span>}
+                    </span>
+                    <span className={`bottom-tab ${bottomTab === 'output' ? 'active' : ''}`} onClick={() => setBottomTab('output')}>OUTPUT</span>
+                    <span className={`bottom-tab ${bottomTab === 'chaos' ? 'active' : ''}`} onClick={() => setBottomTab('chaos')}>
+                      CHAOS {chaosResults && <span className="problem-badge" style={{ background: chaosResults.resilienceScore >= 70 ? '#2ea043' : '#e3b341' }}>{chaosResults.resilienceScore}%</span>}
+                    </span>
                   </div>
-                </div>
-                {bottomTab === 'problems' && (
-                  <div className="problems-host">
-                    {!problems.length && <div style={{ color: 'var(--vscode-text-dim)' }}>✓ No problems detected.</div>}
-                    {problems.map((p, i) => (
-                      <div key={i} className={`problem-row ${p.severity}`}>
-                        <span>{p.severity === 'error' ? '✖' : '⚠'}</span>
-                        <span className="problem-file">{p.file}:{p.line}:{p.col}</span>
-                        <span>{p.message}</span>
+                  <div className="terminal-panel" style={{ display: bottomTab === 'terminal' ? 'flex' : 'none' }}>
+                    <div className="terminal-command-row">
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <button className="icon-btn" title="New Terminal" onClick={newTerminal}>New</button>
+                        <button className="icon-btn" title="Split Terminal" onClick={splitTerminal}>{isSplit ? 'Unsplit' : 'Split'}</button>
+                        <button className="icon-btn" title="Kill Terminal" onClick={killTerminal}>Kill</button>
+                        <button className="icon-btn" title="Clear Terminal" onClick={clearTerminal}>Clear</button>
+                        <button className="icon-btn" title="Switch shell" onClick={toggleTerminalMode}>Mode: {terminalMode}</button>
                       </div>
-                    ))}
+                      <input
+                        className="terminal-command-input"
+                        value={terminalCommand}
+                        onChange={e => setTerminalCommand(e.target.value)}
+                        onKeyDown={handleTerminalCommandKeyDown}
+                        placeholder="Run commands: help, run, open app.js, search foo, toggle minimap"
+                      />
+                      <button className="icon-btn" title="Execute command" onClick={executeTerminalCommand}>Run</button>
+                    </div>
+                    <div className="terminal-split" style={{ display: 'flex', gap: 8, flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                      <div ref={terminalRef} className="terminal-host" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }} />
+                      {isSplit && <div ref={splitRef} className="terminal-host" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }} />}
+                    </div>
                   </div>
-                )}
-                {bottomTab === 'output' && <div className="problems-host">{runOutput || 'No output yet.'}</div>}
-                {bottomTab === 'chaos' && (
-                  <div className="problems-host">
-                    {isChaosRunning && <div style={{ color: 'var(--vscode-text-dim)' }}>⏳ Running chaos scenarios in parallel...</div>}
-                    {chaosResults?.error && <div style={{ color: '#f44336' }}>{chaosResults.error}</div>}
-                    {chaosResults && !chaosResults.error && (
-                      <>
-                        <div className="chaos-score" style={{ color: chaosResults.resilienceScore >= 70 ? '#4caf50' : chaosResults.resilienceScore >= 40 ? '#e3b341' : '#f44336' }}>
-                          Resilience Score: {chaosResults.resilienceScore}% ({chaosResults.survived}/{chaosResults.total} scenarios survived)
+                  {bottomTab === 'problems' && (
+                    <div className="problems-host">
+                      {!problems.length && <div style={{ color: 'var(--vscode-text-dim)' }}>✓ No problems detected.</div>}
+                      {problems.map((p, i) => (
+                        <div key={i} className={`problem-row ${p.severity}`}>
+                          <span>{p.severity === 'error' ? '✖' : '⚠'}</span>
+                          <span className="problem-file">{p.file}:{p.line}:{p.col}</span>
+                          <span>{p.message}</span>
                         </div>
-                        {chaosResults.results.map((r, i) => (
-                          <div key={i} className={`chaos-row ${r.survived ? 'survived' : r.killed ? 'killed' : 'failed'}`}>
-                            <span className="chaos-icon">{r.survived ? '✅' : r.killed ? '💀' : '❌'}</span>
-                            <span className="chaos-scenario">{r.scenario}</span>
-                            <span className="chaos-time">{r.elapsed}ms</span>
-                            <div className="chaos-output">{r.output.slice(0, 120)}{r.output.length > 120 ? '...' : ''}</div>
+                      ))}
+                    </div>
+                  )}
+                  {bottomTab === 'output' && <div className="problems-host">{runOutput || 'No output yet.'}</div>}
+                  {bottomTab === 'chaos' && (
+                    <div className="problems-host">
+                      {isChaosRunning && <div style={{ color: 'var(--vscode-text-dim)' }}>⏳ Running chaos scenarios in parallel...</div>}
+                      {chaosResults?.error && <div style={{ color: '#f44336' }}>{chaosResults.error}</div>}
+                      {chaosResults && !chaosResults.error && (
+                        <>
+                          <div className="chaos-score" style={{ color: chaosResults.resilienceScore >= 70 ? '#4caf50' : chaosResults.resilienceScore >= 40 ? '#e3b341' : '#f44336' }}>
+                            Resilience Score: {chaosResults.resilienceScore}% ({chaosResults.survived}/{chaosResults.total} scenarios survived)
                           </div>
-                        ))}
-                      </>
-                    )}
-                    {!chaosResults && !isChaosRunning && <div style={{ color: 'var(--vscode-text-dim)' }}>Click "Chaos Test" to stress-test your code under real failure conditions.</div>}
-                  </div>
-                )}
-              </Panel>
-            </PanelGroup>
+                          {chaosResults.results.map((r, i) => (
+                            <div key={i} className={`chaos-row ${r.survived ? 'survived' : r.killed ? 'killed' : 'failed'}`}>
+                              <span className="chaos-icon">{r.survived ? '✅' : r.killed ? '💀' : '❌'}</span>
+                              <span className="chaos-scenario">{r.scenario}</span>
+                              <span className="chaos-time">{r.elapsed}ms</span>
+                              <div className="chaos-output">{r.output.slice(0, 120)}{r.output.length > 120 ? '...' : ''}</div>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                      {!chaosResults && !isChaosRunning && <div style={{ color: 'var(--vscode-text-dim)' }}>Click "Chaos Test" to stress-test your code under real failure conditions.</div>}
+                    </div>
+                  )}
+                </Panel>
+              </PanelGroup>
             )}
           </Panel>
-          
+
           {showAIPanel && (
             <>
               <PanelResizeHandle className="resize-handle" />
               <Panel defaultSize={30} minSize={20} maxSize={45}>
-            <div className="ai-chat-panel">
-              <div className="sidebar-header">
-                <span className="sidebar-title-text">AI ASSISTANT</span>
-                <div style={{ flex: 1 }} />
-                <button className="icon-btn" onClick={() => setChatSidebarOpen(!chatSidebarOpen)} title="Chat History" style={{ marginLeft: 4 }}>
-                  <Menu size={14} />
-                </button>
-              </div>
-              <div className="ai-tabs">
-                <button className={`ai-tab ${aiTab === 'chat' ? 'active' : ''}`} onClick={() => setAiTab('chat')}>Chat</button>
-                <button className={`ai-tab ${aiTab === 'history' ? 'active' : ''}`} onClick={() => setAiTab('history')}>Debug History</button>
-              </div>
-              {chatSidebarOpen && (
-                <div className="chat-history-dropdown">
-                  <div className="chat-history-header">
-                    <span style={{ fontSize: '11px', fontWeight: 600 }}>PAST CHATS</span>
-                    <button className="icon-btn" onClick={createNewChat} title="New Chat"><Plus size={14} /></button>
+                <div className="ai-chat-panel">
+                  <div className="sidebar-header">
+                    <span className="sidebar-title-text">AI ASSISTANT</span>
+                    <div style={{ flex: 1 }} />
+                    <button className="icon-btn" onClick={() => setChatSidebarOpen(!chatSidebarOpen)} title="Chat History" style={{ marginLeft: 4 }}>
+                      <Menu size={14} />
+                    </button>
                   </div>
-                  <div className="chat-history-list">
-                    {chatSessions.map(s => (
-                      <div key={s.id} className={`chat-session-item ${activeSessionId === s.id ? 'active' : ''}`} onClick={() => setActiveSessionId(s.id)}>
-                        {editingSessionId === s.id ? (
-                          <input 
-                            autoFocus
-                            className="chat-rename-input"
-                            value={editSessionName}
-                            onChange={e => setEditSessionName(e.target.value)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') renameChat(s.id, editSessionName);
-                              if (e.key === 'Escape') setEditingSessionId(null);
-                            }}
-                            onBlur={() => renameChat(s.id, editSessionName)}
-                          />
-                        ) : (
-                          <>
-                            <span className="chat-session-name" title={s.name}>{s.name}</span>
-                            <div className="chat-session-actions">
-                              <button className="icon-btn" onClick={e => { e.stopPropagation(); setEditSessionName(s.name); setEditingSessionId(s.id); }}><Edit2 size={12} /></button>
-                              <button className="icon-btn" onClick={e => deleteChat(s.id, e)}><Trash2 size={12} /></button>
-                            </div>
-                          </>
-                        )}
+                  <div className="ai-tabs">
+                    <button className={`ai-tab ${aiTab === 'chat' ? 'active' : ''}`} onClick={() => setAiTab('chat')}>Chat</button>
+                    <button className={`ai-tab ${aiTab === 'history' ? 'active' : ''}`} onClick={() => setAiTab('history')}>Debug History</button>
+                  </div>
+                  {chatSidebarOpen && (
+                    <div className="chat-history-dropdown">
+                      <div className="chat-history-header">
+                        <span style={{ fontSize: '11px', fontWeight: 600 }}>PAST CHATS</span>
+                        <button className="icon-btn" onClick={createNewChat} title="New Chat"><Plus size={14} /></button>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                      <div className="chat-history-list">
+                        {chatSessions.map(s => (
+                          <div key={s.id} className={`chat-session-item ${activeSessionId === s.id ? 'active' : ''}`} onClick={() => setActiveSessionId(s.id)}>
+                            {editingSessionId === s.id ? (
+                              <input
+                                autoFocus
+                                className="chat-rename-input"
+                                value={editSessionName}
+                                onChange={e => setEditSessionName(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') renameChat(s.id, editSessionName);
+                                  if (e.key === 'Escape') setEditingSessionId(null);
+                                }}
+                                onBlur={() => renameChat(s.id, editSessionName)}
+                              />
+                            ) : (
+                              <>
+                                <span className="chat-session-name" title={s.name}>{s.name}</span>
+                                <div className="chat-session-actions">
+                                  <button className="icon-btn" onClick={e => { e.stopPropagation(); setEditSessionName(s.name); setEditingSessionId(s.id); }}><Edit2 size={12} /></button>
+                                  <button className="icon-btn" onClick={e => deleteChat(s.id, e)}><Trash2 size={12} /></button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
-              {aiTab === 'history' ? (
-                <div className="debug-history-panel">
-                  {debugHistory.length === 0 ? (
-                    <div className="debug-history-empty">No auto-debug cycles yet.</div>
-                  ) : (
-                    debugHistory.map((h, i) => (
-                      <div key={i} className={`debug-history-item status-${h.status}`}>
-                        <div className="debug-history-header">
-                          <span className="attempt">Attempt {h.attempt} / 3</span>
-                          <span className="file">{h.file}</span>
-                          <span className={`status-badge ${h.status}`}>{h.status}</span>
-                        </div>
-                        <div className="debug-history-error">
-                          <strong>Error:</strong>
-                          <pre>{h.error}</pre>
-                        </div>
-                        {h.explanation && (
-                          <div className="debug-history-explanation">
-                            <strong>AI Reasoning:</strong>
-                            <p>{h.explanation}</p>
+                  {aiTab === 'history' ? (
+                    <div className="debug-history-panel">
+                      {debugHistory.length === 0 ? (
+                        <div className="debug-history-empty">No auto-debug cycles yet.</div>
+                      ) : (
+                        debugHistory.map((h, i) => (
+                          <div key={i} className={`debug-history-item status-${h.status}`}>
+                            <div className="debug-history-header">
+                              <span className="attempt">Attempt {h.attempt} / 3</span>
+                              <span className="file">{h.file}</span>
+                              <span className={`status-badge ${h.status}`}>{h.status}</span>
+                            </div>
+                            <div className="debug-history-error">
+                              <strong>Error:</strong>
+                              <pre>{h.error}</pre>
+                            </div>
+                            {h.explanation && (
+                              <div className="debug-history-explanation">
+                                <strong>AI Reasoning:</strong>
+                                <p>{h.explanation}</p>
+                              </div>
+                            )}
+                            {h.diff && (
+                              <div className="debug-history-diff">
+                                <strong>Code Changes:</strong>
+                                <pre>
+                                  {h.diff.split('\n').map((line, idx) => (
+                                    <div key={idx} className={`diff-line ${line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : ''}`}>
+                                      {line}
+                                    </div>
+                                  ))}
+                                </pre>
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {h.diff && (
-                          <div className="debug-history-diff">
-                            <strong>Code Changes:</strong>
-                            <pre>
-                              {h.diff.split('\n').map((line, idx) => (
-                                <div key={idx} className={`diff-line ${line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : ''}`}>
-                                  {line}
-                                </div>
-                              ))}
-                            </pre>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <div className="chat-messages" ref={chatScrollRef}>
+                        {chatMessages.map((m, i) => (
+                          <div key={i} className={`chat-msg ${m.role}`}>
+                            {m.role === 'assistant' ? (
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                            ) : (
+                              m.content
+                            )}
+                          </div>
+                        ))}
+                        {chatLoading && (
+                          <div className="chat-msg assistant" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div><span className="typing-dot" /><span className="typing-dot" /><span className="typing-dot" /></div>
+                            <button onClick={() => abortControllerRef.current?.abort()} style={{ background: '#333', color: '#fff', border: '1px solid #555', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>
+                              Stop
+                            </button>
                           </div>
                         )}
                       </div>
-                    ))
+                      {pendingAIAction && (
+                        <div className="ai-review-panel">
+                          <h4>Review Pending Action</h4>
+                          <p><strong>Summary:</strong> {pendingAIAction.summary}</p>
+                          <div className="ai-review-content">
+                            {pendingAIAction.action === 'scaffold' && (
+                              <ul>{pendingAIAction.data.items.map((f: any, i: number) => <li key={i}>{f.path ? f.path + '/' : ''}{f.name}</li>)}</ul>
+                            )}
+                            {pendingAIAction.action === 'delete' && (
+                              <ul>{pendingAIAction.data.items.map((f: string, i: number) => <li key={i}>{f}</li>)}</ul>
+                            )}
+                            {pendingAIAction.action === 'apply' && (
+                              <div style={{ height: '200px' }}>
+                                <DiffEditor
+                                  original={pendingAIAction.originalCode}
+                                  modified={pendingAIAction.data.code}
+                                  language={getLang(pendingAIAction.data.fileName)}
+                                  options={{ readOnly: true, minimap: { enabled: false } }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                          <div className="ai-review-actions">
+                            <button onClick={rejectAIAction} style={{ background: '#e74c3c', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>Reject</button>
+                            <button onClick={approveAIAction} style={{ background: '#2ecc71', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', marginLeft: '8px' }}>Approve</button>
+                          </div>
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px' }}>
+                        {currentSession && (
+                          <div style={{ display: 'flex', alignItems: 'center' }}>
+                            <span style={{ color: 'var(--vscode-accent)', fontSize: 11, fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }}>{currentSession.name}</span>
+                            <button className="icon-btn" onClick={() => {
+                              setEditingSessionId(currentSession.id);
+                              setEditSessionName(currentSession.name);
+                              setChatSidebarOpen(true);
+                            }} title="Edit Chat Name" style={{ marginLeft: 6 }}>
+                              <Edit2 size={12} />
+                            </button>
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', alignItems: 'center', background: 'var(--vscode-input)', borderRadius: '24px', padding: '8px 16px', gap: '8px' }}>
+                          <textarea className="chat-input" value={chatInput}
+                            onChange={e => {
+                              setChatInput(e.target.value);
+                              e.target.style.height = 'auto';
+                              e.target.style.height = Math.min(e.target.scrollHeight, 300) + 'px';
+                            }}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                if (chatInput.trim()) {
+                                  sendChatMessage();
+                                  e.currentTarget.style.height = 'auto';
+                                }
+                              }
+                            }}
+                            rows={1}
+                            style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'inherit', resize: 'none', padding: '0', fontSize: '13px', alignSelf: 'center', maxHeight: '150px' }}
+                            placeholder="Ask the AI..." />
+
+                          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                            <button className="icon-btn" onClick={() => setShowModelMenu(!showModelMenu)} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', background: 'var(--vscode-bg)', padding: '4px 10px', borderRadius: '16px', color: 'var(--vscode-text-dim)' }}>
+                              <span>{selectedModel.includes('pro') ? 'Pro' : selectedModel.includes('qwen') ? 'Ollama' : 'Flash'}</span>
+                              <ChevronDown size={12} />
+                            </button>
+
+                            {showModelMenu && (
+                              <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', right: 0, background: '#1e1e24', border: '1px solid #333', borderRadius: '12px', padding: '8px 0', width: '220px', zIndex: 1000, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column' }}>
+                                {[
+                                  { id: 'gemini-flash-lite-latest', title: 'Gemini', sub: 'Fastest answers' },
+                                  { id: 'qwen2.5-coder:7b', title: 'Ollama (Qwen)', sub: 'Local processing' }
+                                ].map(m => (
+                                  <div key={m.id} onClick={() => { setSelectedModel(m.id); setShowModelMenu(false); }} style={{ padding: '8px 16px', cursor: 'pointer', background: selectedModel === m.id ? 'rgba(255,255,255,0.05)' : 'transparent', display: 'flex', alignItems: 'center' }}>
+                                    <div style={{ width: '20px' }}>{selectedModel === m.id && <Check size={12} color="var(--vscode-accent)" />}</div>
+                                    <div>
+                                      <div style={{ fontSize: '12px', color: '#fff', fontWeight: selectedModel === m.id ? 'bold' : 'normal' }}>{m.title}</div>
+                                      <div style={{ fontSize: '11px', color: '#aaa' }}>{m.sub}</div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <button className="icon-btn" onClick={sendChatMessage} disabled={chatLoading || !chatInput.trim()} style={{ color: (chatInput.trim() && !chatLoading) ? 'var(--vscode-accent)' : 'inherit' }}>
+                            <Send size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    </>
                   )}
                 </div>
-              ) : (
-                <>
-                  <div className="chat-messages" ref={chatScrollRef}>
-                    {chatMessages.map((m, i) => (
-                      <div key={i} className={`chat-msg ${m.role}`}>
-                        {m.role === 'assistant' ? (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                        ) : (
-                          m.content
-                        )}
-                      </div>
-                    ))}
-                    {chatLoading && (
-                      <div className="chat-msg assistant" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <div><span className="typing-dot" /><span className="typing-dot" /><span className="typing-dot" /></div>
-                        <button onClick={() => abortControllerRef.current?.abort()} style={{ background: '#333', color: '#fff', border: '1px solid #555', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>
-                          Stop
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  {pendingAIAction && (
-                    <div className="ai-review-panel">
-                      <h4>Review Pending Action</h4>
-                      <p><strong>Summary:</strong> {pendingAIAction.summary}</p>
-                      <div className="ai-review-content">
-                        {pendingAIAction.action === 'scaffold' && (
-                          <ul>{pendingAIAction.data.items.map((f: any, i: number) => <li key={i}>{f.path ? f.path + '/' : ''}{f.name}</li>)}</ul>
-                        )}
-                        {pendingAIAction.action === 'delete' && (
-                          <ul>{pendingAIAction.data.items.map((f: string, i: number) => <li key={i}>{f}</li>)}</ul>
-                        )}
-                        {pendingAIAction.action === 'apply' && (
-                          <div style={{ height: '200px' }}>
-                            <DiffEditor
-                              original={pendingAIAction.originalCode}
-                              modified={pendingAIAction.data.code}
-                              language={getLang(pendingAIAction.data.fileName)}
-                              options={{ readOnly: true, minimap: { enabled: false } }}
-                            />
-                          </div>
-                        )}
-                      </div>
-                      <div className="ai-review-actions">
-                        <button onClick={rejectAIAction} style={{ background: '#e74c3c', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>Reject</button>
-                        <button onClick={approveAIAction} style={{ background: '#2ecc71', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', marginLeft: '8px' }}>Approve</button>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px' }}>
-                    {currentSession && (
-                      <div style={{ display: 'flex', alignItems: 'center' }}>
-                        <span style={{ color: 'var(--vscode-accent)', fontSize: 11, fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }}>{currentSession.name}</span>
-                        <button className="icon-btn" onClick={() => {
-                          setEditingSessionId(currentSession.id);
-                          setEditSessionName(currentSession.name);
-                          setChatSidebarOpen(true);
-                        }} title="Edit Chat Name" style={{ marginLeft: 6 }}>
-                          <Edit2 size={12} />
-                        </button>
-                      </div>
-                    )}
-                    
-                    <div style={{ display: 'flex', alignItems: 'center', background: 'var(--vscode-input)', borderRadius: '24px', padding: '8px 16px', gap: '8px' }}>
-                      <textarea className="chat-input" value={chatInput} 
-                        onChange={e => {
-                          setChatInput(e.target.value);
-                          e.target.style.height = 'auto';
-                          e.target.style.height = Math.min(e.target.scrollHeight, 300) + 'px';
-                        }}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            if (chatInput.trim()) {
-                              sendChatMessage();
-                              e.currentTarget.style.height = 'auto';
-                            }
-                          }
-                        }}
-                        rows={1}
-                        style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'inherit', resize: 'none', padding: '0', fontSize: '13px', alignSelf: 'center', maxHeight: '150px' }}
-                        placeholder="Ask the AI..." />
-                      
-                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                        <button className="icon-btn" onClick={() => setShowModelMenu(!showModelMenu)} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', background: 'var(--vscode-bg)', padding: '4px 10px', borderRadius: '16px', color: 'var(--vscode-text-dim)' }}>
-                           <span>{selectedModel.includes('pro') ? 'Pro' : selectedModel.includes('qwen') ? 'Ollama' : 'Flash'}</span>
-                           <ChevronDown size={12} />
-                        </button>
-                        
-                        {showModelMenu && (
-                          <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', right: 0, background: '#1e1e24', border: '1px solid #333', borderRadius: '12px', padding: '8px 0', width: '220px', zIndex: 1000, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column' }}>
-                            {[
-                              { id: 'gemini-flash-lite-latest', title: 'Gemini', sub: 'Fastest answers' },
-                              { id: 'qwen2.5-coder:7b', title: 'Ollama (Qwen)', sub: 'Local processing' }
-                            ].map(m => (
-                              <div key={m.id} onClick={() => { setSelectedModel(m.id); setShowModelMenu(false); }} style={{ padding: '8px 16px', cursor: 'pointer', background: selectedModel === m.id ? 'rgba(255,255,255,0.05)' : 'transparent', display: 'flex', alignItems: 'center' }}>
-                                <div style={{ width: '20px' }}>{selectedModel === m.id && <Check size={12} color="var(--vscode-accent)" />}</div>
-                                <div>
-                                  <div style={{ fontSize: '12px', color: '#fff', fontWeight: selectedModel === m.id ? 'bold' : 'normal' }}>{m.title}</div>
-                                  <div style={{ fontSize: '11px', color: '#aaa' }}>{m.sub}</div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      
-                      <button className="icon-btn" onClick={sendChatMessage} disabled={chatLoading || !chatInput.trim()} style={{ color: (chatInput.trim() && !chatLoading) ? 'var(--vscode-accent)' : 'inherit' }}>
-                        <Send size={16} />
-                      </button>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          </Panel>
-          </>
+              </Panel>
+            </>
           )}
         </PanelGroup>
       </div>
