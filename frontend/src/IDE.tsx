@@ -521,6 +521,13 @@ export default function IDE() {
       xtermSplitRef.current = null;
       setIsSplit(false);
     }
+    
+    if (!xtermRef.current && terminalRef.current) {
+      const primary = createTerminalInstance(terminalRef.current, true);
+      xtermRef.current = primary.term;
+      fitRef.current = primary.fit;
+    }
+    
     if (xtermRef.current) {
       xtermRef.current.clear();
       xtermRef.current.writeln('\r\n\x1b[36mNew terminal session started.\x1b[0m');
@@ -994,19 +1001,10 @@ export default function IDE() {
           });
         }
 
-        if (data.mappedPorts && Object.keys(data.mappedPorts).length > 0) {
-          setPreviewPorts(data.mappedPorts);
-          xtermRef.current?.writeln(`\r\n\x1b[35m► App listening on mapped ports: ${JSON.stringify(data.mappedPorts)}\x1b[0m`);
-          Object.values(data.mappedPorts).forEach((port: any) => {
-            xtermRef.current?.writeln(`\x1b[34m► Preview: http://localhost:${port}\x1b[0m`);
-          });
-          setOpenTabs(t => t.includes('__preview__') ? t : [...t, '__preview__']);
-          setActiveFile('__preview__');
-        } else {
-          // It will populate later via socket event sandbox-ports
-          setPreviewPorts({});
-          setOpenTabs(t => t.filter(x => x !== '__preview__'));
-        }
+        // Ports will be populated dynamically via the 'sandbox-ports' websocket event
+        // based on active listeners inside the container
+        setPreviewPorts({});
+        setOpenTabs(t => t.filter(x => x !== '__preview__'));
       } else if (data.error) {
         xtermRef.current?.writeln(`\r\n\x1b[31m✖ Sandbox error: ${data.error}\x1b[0m`);
         setIsRunning(false);
