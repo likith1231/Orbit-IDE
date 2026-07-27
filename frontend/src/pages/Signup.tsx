@@ -4,6 +4,8 @@ import { saveAuth } from '../auth';
 import Navbar from '../components/Navbar';
 import Galaxy from '../components/Galaxy';
 import './auth-pages.css';
+import { apiFetch } from '../lib/apiFetch';
+
 
 export default function Signup() {
   const [name, setName] = useState('');
@@ -18,7 +20,7 @@ export default function Signup() {
     setError('');
     setLoading(true);
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/auth/signup`, {
+      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password }),

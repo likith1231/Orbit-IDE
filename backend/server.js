@@ -24,10 +24,18 @@ const app = express();
 const server = http.createServer(app);
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
-const io = new Server(server, { cors: { origin: "http://localhost:5173", methods: ["GET", "POST"] } });
+const corsOptions = {
+  origin: ['https://orbit-ide-rho.vercel.app', 'http://localhost:5173'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+const io = new Server(server, { 
+  cors: corsOptions 
+});
 app.set('io', io);
 
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '5mb' }));
 
 const generalLimiter = rateLimit({
@@ -291,6 +299,12 @@ io.on('connection', (socket) => {
 
   const spawnShell = (preferredShell) => {
     if (ptyProcess) { ptyProcess.kill(); ptyProcess = null; }
+
+    if (process.env.TERMINAL_ENABLED !== 'true') {
+      socket.emit('terminal-output', '\r\n\x1b[31mTerminal is disabled in this deployment for security reasons.\x1b[0m\r\n');
+      return;
+    }
+
     const shellMap = { bash: 'bash', zsh: 'zsh', sh: 'sh' };
     const shell = os.platform() === 'win32'
       ? 'powershell.exe'
