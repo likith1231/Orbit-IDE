@@ -21,6 +21,7 @@ const chaosRoutes = require('./routes/chaos');
 const gitRoutes = require('./routes/git');
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
