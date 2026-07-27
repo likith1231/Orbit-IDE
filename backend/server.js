@@ -28,7 +28,8 @@ const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 const corsOptions = {
   origin: ['https://orbit-ide-rho.vercel.app', 'http://localhost:5173'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning']
+  allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+  credentials: true
 };
 
 const io = new Server(server, { 
