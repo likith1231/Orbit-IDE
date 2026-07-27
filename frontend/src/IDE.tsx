@@ -453,12 +453,16 @@ export default function IDE() {
   }, [activeFile, bindYjs]);
 
   useEffect(() => {
-    if (!terminalRef.current) return;
+    // Unconditionally establish the WebSocket connection so it's always ready
     socketRef.current = io(import.meta.env.VITE_API_URL || 'http://localhost:5000');
 
-    const primary = createTerminalInstance(terminalRef.current, true);
-    xtermRef.current = primary.term;
-    fitRef.current = primary.fit;
+    let primary: any = null;
+    // Only instantiate the terminal UI on mount if the DOM ref is ready
+    if (terminalRef.current) {
+      primary = createTerminalInstance(terminalRef.current, true);
+      xtermRef.current = primary.term;
+      fitRef.current = primary.fit;
+    }
 
     socketRef.current.on('terminal-output', d => {
       xtermRef.current?.write(d);
