@@ -162,13 +162,45 @@ router.post('/', validate(codeExecutionSchema), async (req, res) => {
     }
 
     // Return immediately so the HTTP request doesn't hang
-    res.json({ containerId: container.id, mappedPorts, message: 'Sandbox started' });
+    res.json({ containerId: container.id, message: 'Sandbox started' });
+
+    // Dynamic port detection interval
+    const checkInterval = setInterval(async () => {
+      try {
+        const { State } = await container.inspect();
+        if (!State.Running) return clearInterval(checkInterval);
+
+        const exec = await container.exec({ Cmd: ['netstat', '-tlna'], AttachStdout: true });
+        const stream = await exec.start();
+        
+        stream.on('data', (chunk) => {
+          const out = chunk.toString('utf8');
+          const activeMappedPorts = {};
+          
+          for (const [key, value] of Object.entries(mappedPorts)) {
+             const internalPort = key.split('/')[0];
+             // Check if netstat shows listening on this port (e.g. :::3000 or 0.0.0.0:3000)
+             if ((out.includes(`:${internalPort} `) || out.includes(`:${internalPort}\t`) || new RegExp(`:${internalPort}\\s+.*LISTEN`).test(out))) {
+               activeMappedPorts[key] = value;
+             }
+          }
+          
+          if (Object.keys(activeMappedPorts).length > 0 && io && socketId) {
+             io.to(socketId).emit('sandbox-ports', activeMappedPorts);
+          }
+        });
+      } catch (err) {
+         clearInterval(checkInterval);
+      }
+    }, 2000);
 
     // Cleanup when container finishes naturally or via stop
     container.wait().then(() => {
+      clearInterval(checkInterval);
       if (dir) fs.rm(dir, { recursive: true, force: true }, () => {});
       if (io && socketId) io.to(socketId).emit('sandbox-exit', { code: 0 });
     }).catch(err => {
+      clearInterval(checkInterval);
       if (dir) fs.rm(dir, { recursive: true, force: true }, () => {});
       if (io && socketId) io.to(socketId).emit('sandbox-exit', { error: err.message });
     });

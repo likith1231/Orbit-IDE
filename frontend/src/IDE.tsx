@@ -319,8 +319,13 @@ export default function IDE() {
   const [projectInsights, setProjectInsights] = useState({ fileCount: 0, lineCount: 0, todoCount: 0, largeFiles: [] as string[] });
   const [terminalMode, setTerminalMode] = useState<'bash' | 'zsh' | 'sh'>('bash');
   const [terminalCommand, setTerminalCommand] = useState('');
+  const xtermRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<any>(null);
   const xtermSplitRef = useRef<Terminal | null>(null);
+  const fitSplitRef = useRef<any>(null);
+  const terminalRef = useRef<HTMLDivElement | null>(null);
   const splitRef = useRef<HTMLDivElement | null>(null);
+  const socketRef = useRef<any>(null);
   const [isSplit, setIsSplit] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { role: 'assistant', content: "I'm your AI coding agent.\n\nTry:\n• \"create a REST API with auth\"\n• \"fix the errors in this file\"\n• \"run this file\"\n• \"explain this code\"\n\nI can create entire multi-file projects in one shot." },
@@ -347,9 +352,7 @@ export default function IDE() {
     originalCode?: string,
   } | null>(null);
 
-  const terminalRef = useRef<HTMLDivElement | null>(null);
-  const socketRef = useRef<any>(null);
-  const xtermRef = useRef<Terminal | null>(null);
+
   const saveTimeout = useRef<number | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -455,6 +458,7 @@ export default function IDE() {
 
     const primary = createTerminalInstance(terminalRef.current, true);
     xtermRef.current = primary.term;
+    fitRef.current = primary.fit;
 
     socketRef.current.on('terminal-output', d => {
       xtermRef.current?.write(d);
@@ -472,6 +476,19 @@ export default function IDE() {
       setIsRunning(false);
       setSandboxId(null);
     });
+    
+    socketRef.current.on('sandbox-ports', (ports: Record<string, string>) => {
+      setPreviewPorts(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(ports)) return prev;
+        xtermRef.current?.writeln(`\r\n\x1b[35m► App listening on mapped ports: ${JSON.stringify(ports)}\x1b[0m`);
+        Object.values(ports).forEach((port: any) => {
+          xtermRef.current?.writeln(`\x1b[34m► Preview: http://localhost:${port}\x1b[0m`);
+        });
+        setOpenTabs(t => t.includes('__preview__') ? t : [...t, '__preview__']);
+        return ports;
+      });
+    });
+
     socketRef.current.on('terminal-ready', ({ shell }) => {
       xtermRef.current?.writeln(`\r\n\x1b[36mConnected to ${shell} shell.\x1b[0m`);
     });
@@ -488,17 +505,27 @@ export default function IDE() {
     };
   }, [createTerminalInstance]);
 
+  // Ensure terminal is resized when tab is opened
+  useEffect(() => {
+    if (bottomTab === 'terminal') {
+      setTimeout(() => {
+        fitRef.current?.fit();
+        fitSplitRef.current?.fit();
+      }, 50);
+    }
+  }, [bottomTab]);
+
   const newTerminal = () => {
-    xtermRef.current?.dispose();
-    xtermSplitRef.current?.dispose();
-    xtermSplitRef.current = null;
-    setIsSplit(false);
-    const termBlock = terminalRef.current;
-    if (!termBlock) return;
-    const { term } = createTerminalInstance(termBlock, true);
-    xtermRef.current = term;
+    if (xtermSplitRef.current) {
+      xtermSplitRef.current.dispose();
+      xtermSplitRef.current = null;
+      setIsSplit(false);
+    }
+    if (xtermRef.current) {
+      xtermRef.current.clear();
+      xtermRef.current.writeln('\r\n\x1b[36mNew terminal session started.\x1b[0m');
+    }
     socketRef.current?.emit('terminal-restart', { shell: terminalMode });
-    term.writeln('\r\n\x1b[36mNew terminal session started.\x1b[0m');
   };
 
   // Use effect to create the split terminal after the split container mounts
@@ -516,9 +543,10 @@ export default function IDE() {
       xtermRef.current?.writeln('\r\n\x1b[31mCould not create split terminal: container not ready.\x1b[0m');
       return;
     }
-    const { term, obs } = createTerminalInstance(container, true);
+    const { term, fit, obs } = createTerminalInstance(container, true);
     term.writeln('\r\n\x1b[36mSplit terminal ready — shares session with primary pane.\x1b[0m');
     xtermSplitRef.current = term;
+    fitSplitRef.current = fit;
     return () => {
       obs.disconnect();
       xtermSplitRef.current?.dispose();
@@ -975,9 +1003,9 @@ export default function IDE() {
           setOpenTabs(t => t.includes('__preview__') ? t : [...t, '__preview__']);
           setActiveFile('__preview__');
         } else {
+          // It will populate later via socket event sandbox-ports
           setPreviewPorts({});
           setOpenTabs(t => t.filter(x => x !== '__preview__'));
-          if (activeFile === '__preview__') setActiveFile(null);
         }
       } else if (data.error) {
         xtermRef.current?.writeln(`\r\n\x1b[31m✖ Sandbox error: ${data.error}\x1b[0m`);
@@ -1619,6 +1647,8 @@ export default function IDE() {
                   <div style={{ display: 'flex', gap: 2 }}>
                     <button className="icon-btn" onClick={() => setShowNewItem(showNewItem === 'file' ? null : 'file')} title="New File (Ctrl+N)"><Plus size={14} /></button>
                     <button className="icon-btn" onClick={() => setShowNewItem(showNewItem === 'folder' ? null : 'folder')} title="New Folder"><FolderPlus size={14} /></button>
+                    <button className="icon-btn" title="Refresh Explorer" onClick={refreshTree}><RefreshCw size={14} /></button>
+                    <button className="icon-btn" title="Collapse All Folders" onClick={() => { setExpanded(new Set()); setIsRootExpanded(false); }}><Minus size={14} /></button>
                   </div>
                 </div>
                 {showNewItem && (
@@ -1635,8 +1665,6 @@ export default function IDE() {
                     <div style={{ flex: 1, userSelect: 'none' }}>
                       {isRootExpanded ? '▾' : '▸'} {project?.name || 'project'}
                     </div>
-                    <button className="icon-btn compact" title="Collapse all folders" onClick={(e) => { e.stopPropagation(); setExpanded(new Set()); }}>Collapse</button>
-                    <button className="icon-btn compact" title="Refresh file tree" onClick={(e) => { e.stopPropagation(); refreshTree(); }}>↻</button>
                   </div>
                   {isRootExpanded && (
                     <TreeNode node={tree} depth={0} openFile={openFile} activeFile={activeFile}

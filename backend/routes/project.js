@@ -31,7 +31,6 @@ router.post('/', async (req, res) => {
         data: {
             name: name || 'untitled-project',
             userId: req.userId,
-            files: { create: [{ name: 'index.js', language: 'javascript', content: '// new file\n' }] },
         },
         include: { files: true },
     });

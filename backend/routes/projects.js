@@ -50,7 +50,6 @@ router.post('/', validate(projectSchema), async (req, res) => {
     const project = await prisma.project.create({
         data: {
             name: name || 'untitled-project', userId: req.userId,
-            files: { create: [{ name: 'index.js', path: '', language: 'javascript', content: '// new file\n' }] },
         },
         include: { files: true },
     });

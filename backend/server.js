@@ -298,6 +298,7 @@ io.on('connection', (socket) => {
   let ptyProcess = null;
 
   const spawnShell = (preferredShell) => {
+    console.log('Spawning shell:', preferredShell);
     if (ptyProcess) { ptyProcess.kill(); ptyProcess = null; }
 
     if (process.env.TERMINAL_ENABLED !== 'true') {
@@ -315,7 +316,10 @@ io.on('connection', (socket) => {
   };
 
   spawnShell('bash');
-  socket.on('terminal-input', (data) => { ptyProcess?.write(data); });
+  socket.on('terminal-input', (data) => { 
+    console.log('Received terminal input:', JSON.stringify(data));
+    ptyProcess?.write(data); 
+  });
   socket.on('terminal-restart', ({ shell } = {}) => { spawnShell(shell || 'bash'); });
   socket.on('disconnect', () => { ptyProcess?.kill(); });
 });

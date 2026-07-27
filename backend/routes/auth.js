@@ -35,7 +35,6 @@ router.post('/signup', authLimiter, validate(signupSchema), async (req, res) => 
                 userId: user.id,
                 files: {
                     create: [
-                        { name: 'index.js', language: 'javascript', content: '// Welcome to your sandbox\nconsole.log("Hello world");\n' },
                         { name: 'README.md', language: 'markdown', content: '# New Project\n' },
                     ],
                 },
