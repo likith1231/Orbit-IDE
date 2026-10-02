@@ -24,6 +24,10 @@ A cloud IDE in the browser: Monaco editor, real terminals, multi-language code e
 
 **Prerequisites:** Node.js 20+, PostgreSQL, Docker (running).
 
+**Quick start:** after creating `backend/.env` (below), run `./dev.sh` from the repo root. It installs dependencies, updates the database, stops any old backend still running, checks your setup, and starts the backend and frontend together.
+
+**Manual steps:**
+
 ```bash
 # Backend
 cd backend
