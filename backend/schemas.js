@@ -68,6 +68,7 @@ const aiChatSchema = z.object({
   activeFile: z.object({ path: z.string().max(1024), content: z.string().max(2_000_000).optional() }).nullish(),
   selection: z.string().max(100_000).nullish(),
   model: z.string().max(100).optional(),
+  verify: z.boolean().optional(),
 });
 
 const aiDebugSchema = z.object({

@@ -29,7 +29,7 @@ router.get('/models', (req, res) => {
 
 // Streams Server-Sent Events: {type:"text",text} ... then {type:"done",reply,changes,run} or {type:"error",error}.
 router.post('/chat', perUser(60, 15 * 60 * 1000), validate(aiChatSchema), async (req, res) => {
-  const { projectId, messages, activeFile, selection, model } = req.body;
+  const { projectId, messages, activeFile, selection, model, verify } = req.body;
   const controller = new AbortController();
   res.on('close', () => { if (!res.writableFinished) controller.abort(); });
 
@@ -53,8 +53,11 @@ router.post('/chat', perUser(60, 15 * 60 * 1000), validate(aiChatSchema), async 
   try {
     const result = await ai.chat({
       messages, files, activeFile, selection, model,
+      verify: verify !== false,
+      userId: req.userId,
       signal: controller.signal,
       onText: (text) => send({ type: 'text', text }),
+      onEvent: (event) => send(event),
     });
     send({ type: 'done', ...result });
   } catch (err) {

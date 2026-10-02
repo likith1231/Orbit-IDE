@@ -7,6 +7,11 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { z } = require('zod');
 const config = require('../config');
 
+const { verifyChanges } = require('./verify');
+
+// Proposed changes are tested in a sandbox; on failure Claude gets the real output and revises.
+const MAX_VERIFY_ATTEMPTS = 3;
+
 const client = config.anthropicApiKey ? new Anthropic({ apiKey: config.anthropicApiKey }) : null;
 
 const MODELS = [
@@ -34,7 +39,11 @@ Guidelines:
 - To add dependencies, edit package.json / requirements.txt; the sandbox installs them on run.
 - Code runs in Linux containers. Servers must listen on 0.0.0.0 (ports 3000, 5000, 5173, 8000 or 8080 are previewable).
 - Never claim you ran code or invent program output.
-- Be concise: a short summary of what you changed and why is enough.`;
+- Be concise: a short summary of what you changed and why is enough.
+
+Verification: before the user sees your edits, Orbit applies them to a scratch copy of the project and proves they work — it runs the project's tests (npm test, pytest, node --test), or runs the file you pass to run_file, or at least compiles the changed files. If that fails, you get the real output back as the tool result and must fix the problem by calling write_files again (only resend files that need changing). So:
+- When you add or change non-trivial logic, also add or update a small test (test_*.py for Python; a "test" script in package.json or *.test.js with node:test for JavaScript).
+- Make tests deterministic and fast; never depend on network services or keyboard input.`;
 
 const TOOLS = [
   {
@@ -204,7 +213,7 @@ async function sendStream(params, { onText, signal } = {}) {
  * Streamed chat turn. Calls onText(delta) as text arrives and resolves with
  * { reply, changes, run }.
  */
-async function chat({ messages, files, activeFile, selection, model, onText, signal }) {
+async function chat({ messages, files, activeFile, selection, model, onText, onEvent, signal, verify = false, userId }) {
   const history = toApiMessages(messages);
   if (!history.length || history[history.length - 1].role !== 'user') {
     throw new AIError('The last message must come from the user.', 400);
@@ -225,39 +234,96 @@ async function chat({ messages, files, activeFile, selection, model, onText, sig
   }
 
   const chosen = pickModel(model);
-  const message = await sendStream({
+  const system = [
+    { type: 'text', text: SYSTEM_INSTRUCTIONS },
+    { type: 'text', text: projectSnapshot(files, activeFile?.path), cache_control: { type: 'ephemeral' } },
+  ];
+  const request = (msgs) => sendStream({
     model: chosen,
     max_tokens: 64000,
     ...modelParams(chosen, 'medium'),
-    system: [
-      { type: 'text', text: SYSTEM_INSTRUCTIONS },
-      { type: 'text', text: projectSnapshot(files, activeFile?.path), cache_control: { type: 'ephemeral' } },
-    ],
+    system,
     tools: TOOLS,
     tool_choice: { type: 'auto' },
-    messages: history,
+    messages: msgs,
   }, { onText, signal });
 
-  const text = message.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  let convo = history;
+  let message = await request(convo);
+  const texts = [];
+  const merged = { writes: new Map(), deletes: new Set(), run: null };
+  const notes = [];
+  const attempts = [];
 
-  if (message.stop_reason === 'refusal') {
-    return { reply: text || 'Claude declined to help with this request.', changes: null, run: null };
-  }
-  const hasTool = message.content.some(b => b.type === 'tool_use');
-  if (message.stop_reason === 'max_tokens' && hasTool) {
-    return { reply: `${text}\n\n⚠ The response was cut off before the file edits were complete. Ask for fewer files at a time.`.trim(), changes: null, run: null };
+  for (let attempt = 1; ; attempt++) {
+    const text = message.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+    if (text) texts.push(text);
+
+    if (message.stop_reason === 'refusal') {
+      notes.push('Claude declined to continue with this request.');
+      break;
+    }
+    if (message.stop_reason === 'max_tokens' && message.content.some(b => b.type === 'tool_use')) {
+      notes.push('⚠ The response was cut off before the file edits were complete. Ask for fewer files at a time.');
+      break;
+    }
+
+    const { changes, run, invalid, rejectedPaths } = collectActions(message);
+    if (invalid.length) notes.push(`⚠ Ignored ${invalid.length} malformed tool call(s).`);
+    if (rejectedPaths.length) notes.push(`⚠ Skipped unsafe path(s) outside the project: ${rejectedPaths.join(', ')}`);
+    // Later attempts refine earlier ones: a file written again replaces the earlier version.
+    for (const w of changes?.writes || []) { merged.writes.set(w.path, w.content); merged.deletes.delete(w.path); }
+    for (const d of changes?.deletes || []) { merged.deletes.add(d); merged.writes.delete(d); }
+    if (run) merged.run = run;
+
+    if (!verify || !changes) break;
+
+    // ── Prove the accumulated changes work ──
+    const current = { writes: [...merged.writes].map(([path, content]) => ({ path, content })), deletes: [...merged.deletes] };
+    onEvent?.({ type: 'verify', phase: 'start', attempt });
+    const result = await verifyChanges({ files, changes: current, runPath: merged.run, signal, userId });
+    attempts.push({ attempt, ...result });
+    onEvent?.({ type: 'verify', phase: 'result', attempt, ...result });
+    if (result.status !== 'failed' || attempt >= MAX_VERIFY_ATTEMPTS || signal?.aborted) break;
+
+    // ── Feed the real failure back so Claude can fix it ──
+    const toolUses = message.content.filter(b => b.type === 'tool_use');
+    const failure = `Your changes were applied to a scratch copy of the project and checked with \`${result.label}\`. It FAILED (${result.summary}).
+
+Output (last part):
+${result.output.slice(-5000)}
+
+Find the root cause and fix it by calling write_files again with the corrected full content of every file that needs to change. Files you don't resend keep the version you already proposed.`;
+    const toolResults = toolUses.map((b, i) => ({
+      type: 'tool_result',
+      tool_use_id: b.id,
+      is_error: i === 0,
+      content: i === 0 ? failure : 'Recorded.',
+    }));
+    convo = [...convo, { role: 'assistant', content: message.content }, { role: 'user', content: toolResults }];
+    onEvent?.({ type: 'verify', phase: 'revising', attempt });
+    onText?.('\n\n');
+    message = await request(convo);
   }
 
-  const { changes, run, invalid, rejectedPaths } = collectActions(message);
-  let reply = text;
-  if (invalid.length) reply += `\n\n⚠ Ignored ${invalid.length} malformed tool call(s).`;
-  if (rejectedPaths.length) reply += `\n\n⚠ Skipped unsafe path(s) outside the project: ${rejectedPaths.join(', ')}`;
+  const finalChanges = merged.writes.size || merged.deletes.size
+    ? { writes: [...merged.writes].map(([path, content]) => ({ path, content })), deletes: [...merged.deletes] }
+    : null;
+  let reply = [...texts, ...notes].join('\n\n');
   if (!reply) {
-    reply = changes
-      ? `Proposed changes to ${[...changes.writes.map(w => w.path), ...changes.deletes].map(p => `\`${p}\``).join(', ')}.`
-      : run ? `Running ${run}…` : 'Done.';
+    reply = finalChanges
+      ? `Proposed changes to ${[...finalChanges.writes.map(w => w.path), ...finalChanges.deletes].map(p => `\`${p}\``).join(', ')}.`
+      : merged.run ? `Running ${merged.run}…` : 'Done.';
   }
-  return { reply, changes, run, model: message.model };
+  const last = attempts[attempts.length - 1];
+  const verification = attempts.length ? { status: last.status, summary: last.summary, label: last.label, kind: last.kind, output: last.output, attempts: attempts.map(a => ({ attempt: a.attempt, status: a.status, summary: a.summary, label: a.label, durationMs: a.durationMs })) } : null;
+  return { reply, changes: finalChanges, run: merged.run, model: message.model, verification };
+}
+
+/** Prove the project's current state (no proposed changes): runs its tests or checks. */
+async function verifyProject({ files, runPath, signal, userId }) {
+  const all = files.filter(f => !f.isFolder).map(f => (f.path ? `${f.path}/${f.name}` : f.name));
+  return verifyChanges({ files, changes: { writes: [], deletes: [] }, runPath, signal, userId, changedPaths: all });
 }
 
 /** Fix code given a real error from the sandbox. Resolves with { changes, explanation }. */
@@ -298,4 +364,4 @@ async function autocomplete({ prefix, suffix, language, signal }) {
   return text;
 }
 
-module.exports = { chat, debug, autocomplete, friendlyError, AIError, MODELS, enabled: () => !!client };
+module.exports = { chat, debug, autocomplete, verifyProject, friendlyError, AIError, MODELS, enabled: () => !!client };

@@ -4,6 +4,18 @@ A cloud IDE in the browser: Monaco editor, real terminals, multi-language code e
 
 **Stack:** React + Vite (frontend, deployable to Vercel) · Express + Socket.IO + Prisma/Postgres (backend) · Docker (terminals and sandboxes) · Claude API (AI).
 
+## What makes Orbit different: AI changes that are proven to work
+
+Most AI coding tools hand you code that *looks* right and leave you to find out it doesn't run. Orbit **proves** every change before you see it:
+
+1. Claude proposes edits.
+2. Orbit applies them to a throwaway copy of your project in a sandbox container, so your files are untouched.
+3. It runs your **tests** (`npm test`, `pytest`, `node --test`), or runs the program, or at least compiles the changed files.
+4. If anything fails, Claude gets the **real error output** and fixes its own code. This repeats up to 3 attempts.
+5. You review the diff with a **Verified ✓** badge (for example "npm test: 9 passed") or an honest **Not verified** with the log.
+
+Claude is also told that its work gets tested, so it writes tests alongside non-trivial logic. You can run the same check any time with **Run tests** in the Run & Debug panel, and turn proofs off in Settings.
+
 ## Features
 
 - **Real terminal**: each project gets its own Linux container with your files at `/workspace`. Multiple tabs, split view, `npm install`, `pip install`, `git`, dev servers. Files you create in the terminal show up in the explorer automatically. No `node-pty` needed.
