@@ -1,48 +1,21 @@
 const express = require('express');
-const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const { execSync, spawn } = require('child_process');
+const crypto = require('crypto');
 const validate = require('../middleware/validate');
+const authMiddleware = require('../middleware/auth');
 const { codeExecutionSchema } = require('../schemas');
+const config = require('../config');
+const { docker, ensureImage } = require('../lib/docker');
+const { materialize } = require('../lib/workspace');
+const { IMAGES, buildCmd: buildRunCmd } = require('./run');
 
 const router = express.Router();
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+router.use(authMiddleware);
 
-const IMAGES = {
-  javascript: 'node:20-alpine',
-  typescript: 'node:20-alpine',
-  python: 'python:3.12-alpine',
-  java: 'eclipse-temurin:21-jdk-alpine',
-  c: 'gcc:13-bookworm',
-  cpp: 'gcc:13-bookworm',
-  go: 'golang:1.22-alpine',
-  rust: 'rust:1.78-slim',
-  ruby: 'ruby:3.3-alpine',
-  php: 'php:8.3-cli-alpine',
-  bash: 'bash:5.2-alpine',
-};
-
-function buildCmd(language, fileName) {
-  switch (language) {
-    case 'javascript': return ['node', `/sandbox/${fileName}`];
-    case 'typescript': return ['sh', '-c', `cd /sandbox && npx -y tsx ${fileName}`];
-    case 'python': return ['python3', `/sandbox/${fileName}`];
-    case 'java': {
-      const cls = fileName.replace(/\.java$/, '');
-      return ['sh', '-c', `cd /sandbox && javac ${fileName} && java ${cls}`];
-    }
-    case 'c': return ['sh', '-c', `cd /sandbox && gcc ${fileName} -o out -lm && ./out`];
-    case 'cpp': return ['sh', '-c', `cd /sandbox && g++ ${fileName} -o out && ./out`];
-    case 'go': return ['sh', '-c', `cd /sandbox && go run ${fileName}`];
-    case 'rust': return ['sh', '-c', `cd /sandbox && rustc ${fileName} -o out && ./out`];
-    case 'ruby': return ['ruby', `/sandbox/${fileName}`];
-    case 'php': return ['php', `/sandbox/${fileName}`];
-    case 'bash': return ['bash', `/sandbox/${fileName}`];
-    default: return ['sh', '-c', `echo "No runner for ${language}"`];
-  }
-}
+// Chaos runs are offline, single-file runs.
+const CHAOS_LANGS = new Set(['javascript', 'typescript', 'python', 'java', 'c', 'cpp', 'go', 'rust', 'ruby', 'php', 'bash', 'perl', 'lua']);
+const buildCmd = (language, fileName) => ['sh', '-c', buildRunCmd(language, '', fileName, false, false)];
 
 // Chaos scenarios
 const SCENARIOS = {
@@ -57,7 +30,7 @@ const SCENARIOS = {
   combined: { label: 'All at once (16MB + 5% CPU + kill 2s)', memory: 16, cpu: 0.05, killAfterMs: 2000, network: 'none' },
 };
 
-async function runScenario(code, language, fileName, scenario) {
+async function runScenario(code, language, fileName, scenario, userId) {
   const image = IMAGES[language];
   const cmd = buildCmd(language, fileName);
   const cfg = SCENARIOS[scenario] || SCENARIOS.normal;
@@ -66,14 +39,16 @@ async function runScenario(code, language, fileName, scenario) {
   const start = Date.now();
 
   try {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chaos-'));
-    fs.writeFileSync(path.join(dir, fileName), code || '');
+    dir = path.join(config.sandboxRoot, `chaos-${crypto.randomUUID()}`);
+    await materialize(dir, [{ name: fileName, content: code || '' }]);
 
     container = await docker.createContainer({
       Image: image,
       Cmd: cmd,
       WorkingDir: '/sandbox',
+      Labels: { 'orbit.kind': 'chaos', 'orbit.user': userId },
       HostConfig: {
+        PidsLimit: 128,
         Binds: [`${dir}:/sandbox:rw`],
         Memory: cfg.memory * 1024 * 1024,
         NanoCpus: Math.round(cfg.cpu * 1e9),
@@ -85,10 +60,10 @@ async function runScenario(code, language, fileName, scenario) {
       Tty: false,
     });
 
-    await container.start();
     const stream = await container.attach({ stream: true, stdout: true, stderr: true });
     let output = '';
-    stream.on('data', (chunk) => { output += chunk.toString('utf8'); });
+    docker.modem.demuxStream(stream, { write: c => { output += c.toString('utf8'); } }, { write: c => { output += c.toString('utf8'); } });
+    await container.start();
 
     let killed = false;
     let killTimeout;
@@ -135,7 +110,7 @@ async function runScenario(code, language, fileName, scenario) {
     }
 
     const elapsed = Date.now() - start;
-    const clean = output.replace(/[\x00-\x08]/g, '').trim();
+    const clean = output.trim();
 
     return {
       scenario: cfg.label,
@@ -165,14 +140,15 @@ async function runScenario(code, language, fileName, scenario) {
 
 // POST /api/chaos — runs code against multiple chaos scenarios in parallel
 router.post('/', validate(codeExecutionSchema), async (req, res) => {
-  const { code, language, fileName, socketId, chaosConfig } = req.body;
-  if (!IMAGES[language]) {
+  const { code, language, fileName } = req.body;
+  if (!CHAOS_LANGS.has(language)) {
     return res.status(400).json({ error: `Chaos testing not supported for "${language}"` });
   }
 
   try {
+    await ensureImage(IMAGES[language]);
     const scenarioKeys = Object.keys(SCENARIOS);
-    const results = await Promise.all(scenarioKeys.map(key => runScenario(code, language, fileName, key)));
+    const results = await Promise.all(scenarioKeys.map(key => runScenario(code, language, fileName, key, req.userId)));
     const survivedCount = results.filter(r => r.survived).length;
     const resilienceScore = Math.round((survivedCount / results.length) * 100);
 

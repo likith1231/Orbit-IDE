@@ -1,1 +1,6 @@
 backend/data/
+.env
+*.log
+frontend/test-results/
+frontend/playwright-report/
+*.swp

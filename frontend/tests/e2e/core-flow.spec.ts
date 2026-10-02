@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test('Core flow: Signup, IDE usage, Run, Logout, Persistence', async ({ page }) => {
+  test.setTimeout(120_000); // first run may pull a Docker image
   const timestamp = Date.now();
   const testEmail = `test-${timestamp}@example.com`;
   const testPassword = 'password123';
@@ -14,17 +15,18 @@ test('Core flow: Signup, IDE usage, Run, Logout, Persistence', async ({ page }) 
   await expect(page).toHaveURL(/\/ide/);
 
   await expect(page.locator('.file-tree')).toBeVisible();
-  const indexJsFile = page.locator('.file-name', { hasText: 'index.js' });
-  await expect(indexJsFile).toBeVisible();
+  // New accounts start with a README.md and a main.py.
+  const mainPy = page.locator('.file-name', { hasText: 'main.py' });
+  await expect(mainPy).toBeVisible();
 
-  await indexJsFile.click();
+  await mainPy.click();
   
   await page.waitForTimeout(2000); // Give Monaco time to render
   
   // Click inside the editor view-lines to focus it
   await page.locator('.view-lines').click();
   
-  const codeToType = `// E2E Test Code ${timestamp}\nconsole.log("Hello from Playwright");`;
+  const codeToType = `# E2E Test Code ${timestamp}\nprint("Hello from Playwright")`;
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Meta+A'); 
   await page.keyboard.press('Backspace');
@@ -36,10 +38,9 @@ test('Core flow: Signup, IDE usage, Run, Logout, Persistence', async ({ page }) 
   // Click the run button at the top header
   await page.locator('button.run-btn').filter({ hasText: 'Run' }).first().click();
   
-  // Output might appear in the xterm terminal or output tab. Let's wait for the terminal content.
-  // xterm usually renders text in .xterm-rows
-  const outputOrTerminal = page.locator('.xterm-rows, .problems-host');
-  await expect(outputOrTerminal.first()).toContainText('Hello from Playwright', { timeout: 25000 });
+  // Program output is shown in the Run tab of the terminal panel.
+  const runOutput = page.locator('.terminal-host:visible .xterm-rows');
+  await expect(runOutput.first()).toContainText('Hello from Playwright', { timeout: 60000 });
 
   await page.click('.logout-btn');
   await expect(page).toHaveURL(/\/login/);
@@ -50,7 +51,7 @@ test('Core flow: Signup, IDE usage, Run, Logout, Persistence', async ({ page }) 
 
   await expect(page).toHaveURL(/\/ide/);
   
-  await page.locator('.file-name', { hasText: 'index.js' }).click();
+  await page.locator('.file-name', { hasText: 'main.py' }).click();
   
   await page.waitForTimeout(2000);
   await expect(page.locator('.view-lines').first()).toContainText(`E2E Test Code ${timestamp}`);

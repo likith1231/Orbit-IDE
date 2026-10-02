@@ -1,0 +1,62 @@
+require('dotenv').config();
+const path = require('path');
+
+const isProd = process.env.NODE_ENV === 'production';
+const isTest = process.env.NODE_ENV === 'test';
+
+if (!process.env.JWT_SECRET) {
+  if (isProd) {
+    throw new Error('JWT_SECRET must be set in production. Generate one with: openssl rand -hex 64');
+  }
+  process.env.JWT_SECRET = 'dev-insecure-secret-change-me';
+  console.warn('⚠  JWT_SECRET is not set — using an insecure development secret.');
+}
+
+const list = (v, fallback) => (v ? v.split(',').map(s => s.trim()).filter(Boolean) : fallback);
+
+const dataDir = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
+
+module.exports = {
+  isProd,
+  isTest,
+  port: Number(process.env.PORT) || 5000,
+  // Bind address. Use 127.0.0.1 behind a reverse proxy so the API (and anything user code
+  // could reach on the host) isn't exposed directly.
+  host: process.env.HOST || '0.0.0.0',
+  // Set to "false" once your own account exists to stop strangers using your server and API key.
+  signupEnabled: process.env.SIGNUP_ENABLED !== 'false',
+  jwtSecret: process.env.JWT_SECRET,
+  corsOrigins: list(process.env.CORS_ORIGINS, ['http://localhost:5173', 'https://orbit-ide-rho.vercel.app']),
+
+  // All host-side directories that get bind-mounted into containers live under DATA_DIR.
+  // When the backend itself runs in Docker, mount DATA_DIR at the SAME path on host and
+  // in the container (see docker-compose.yml), otherwise sibling containers see empty dirs.
+  dataDir,
+  workspaceRoot: path.join(dataDir, 'workspaces'),
+  sandboxRoot: path.join(dataDir, 'sandboxes'),
+
+  dockerSocket: process.env.DOCKER_SOCKET || '/var/run/docker.sock',
+  // Optional Docker Hub mirror host, e.g. "mirror.gcr.io", to dodge Docker Hub pull rate limits.
+  imageMirror: process.env.DOCKER_IMAGE_MIRROR || '',
+
+  // Terminal: auto | docker | local | off
+  //   docker — each project gets its own container; safe for multi-user cloud deployments
+  //   local  — shell runs on the backend host (node-pty if installed, otherwise a fallback). Dev only.
+  terminalMode: process.env.TERMINAL_MODE || 'auto',
+  // Build orbit-terminal from docker/terminal.Dockerfile (node + python + git + build tools).
+  // If it isn't available, terminals fall back to terminalFallbackImage.
+  terminalImage: process.env.TERMINAL_IMAGE || 'orbit-terminal:latest',
+  terminalFallbackImage: 'node:20-bookworm-slim',
+  terminalIdleMinutes: Number(process.env.TERMINAL_IDLE_MINUTES) || 20,
+  terminalMemoryMb: Number(process.env.TERMINAL_MEMORY_MB) || 1024,
+
+  // Host that published container ports are reachable on, from the backend's point of view.
+  previewHost: process.env.PREVIEW_HOST || '127.0.0.1',
+
+  // CLAUDE_API_KEY is accepted as an alias because it's an easy name to reach for.
+  anthropicApiKey: (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '').trim(),
+  claudeModel: process.env.CLAUDE_MODEL || 'claude-opus-5-5',
+  // Used for latency-sensitive inline autocomplete only.
+  claudeFastModel: process.env.CLAUDE_FAST_MODEL || 'claude-haiku-4-5',
+  ollamaUrl: process.env.OLLAMA_URL || '',
+};

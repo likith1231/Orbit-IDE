@@ -2,13 +2,10 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Editor, { DiffEditor } from '@monaco-editor/react';
-import { io } from 'socket.io-client';
+import { io, type Socket } from 'socket.io-client';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { MonacoBinding } from 'y-monaco';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Files, Search, Boxes, ChevronRight, ChevronDown, LogOut, Send, Command, Plus, FolderPlus, Trash2, Play, Pencil, Folder, FolderOpen, Zap, Bug, Minus, Settings, GitBranch, Layers, Square, RefreshCw, Database, Rocket, ExternalLink, Code, Terminal as TerminalIcon, X, ChevronRight as ChevronRightIcon, Cpu, Activity, ShieldAlert, FileText, Download, Check, Menu, Edit2, MessageSquare } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -21,10 +18,10 @@ import {
 } from 'react-icons/si';
 import { FaJava, FaFileAlt } from 'react-icons/fa';
 import { TbBrandCSharp } from 'react-icons/tb';
-import { authHeader, getUser, clearAuth } from './auth';
-import '@xterm/xterm/css/xterm.css';
+import { authHeader, getUser, clearAuth, getToken } from './auth';
 import './ide.css';
-import { apiFetch } from './lib/apiFetch';
+import { apiFetch, backendUrl, WS_URL } from './lib/apiFetch';
+import TerminalPanel, { type TerminalPanelHandle } from './components/TerminalPanel';
 
 
 type ChatMessage = { role: 'user' | 'assistant'; content: string };
@@ -87,6 +84,11 @@ type Command = {
   label: string;
   action: () => void;
 };
+
+type ProposedChanges = { writes: { path: string; content: string }[]; deletes: string[] };
+type PendingChanges = { changes: ProposedChanges | null; run: string | null; summary: string; debugAttempt?: number };
+
+const WELCOME_MESSAGE = "I'm Orbit, your Claude-powered coding agent. I can see every file in this project.\n\nTry:\n• \"build a REST API with auth\"\n• \"why does main.py crash?\"\n• \"add tests for utils.js and run them\"\n• select code and press **Ctrl+I** to ask about it\n\nEvery change I propose is shown for your review first.";
 
 type ChaosResponse = {
   resilienceScore: number;
@@ -176,6 +178,7 @@ type TreeNodeProps = {
   setRenameValue: (value: string) => void;
   submitRename: (id: string, isFolder: boolean) => void;
   renameInputRef: React.RefObject<HTMLInputElement | null>;
+  newItemIn?: (folderPath: string) => void;
 };
 
 interface DebugHistoryEntry {
@@ -188,7 +191,7 @@ interface DebugHistoryEntry {
 }
 
 
-function TreeNode({ node, depth, openFile, activeFile, expanded, toggleExpand, startRename, deleteItem, renamingFile, renameValue, setRenameValue, submitRename, renameInputRef }: TreeNodeProps) {
+function TreeNode({ node, depth, openFile, activeFile, expanded, toggleExpand, startRename, deleteItem, renamingFile, renameValue, setRenameValue, submitRename, renameInputRef, newItemIn }: TreeNodeProps) {
   return (
     <>
       {Object.entries(node.children || {}).map(([key, child]) => {
@@ -206,6 +209,7 @@ function TreeNode({ node, depth, openFile, activeFile, expanded, toggleExpand, s
               ) : (
                 <>
                   <span className="file-name">{child.name}</span>
+                  {newItemIn && <button className="file-action-btn" title="New file in folder" onClick={e => { e.stopPropagation(); newItemIn(child.fullPath); }}><Plus size={10} /></button>}
                   <button className="file-action-btn" onClick={e => { e.stopPropagation(); startRename(`folder:${child.id}`, child.name); }}><Pencil size={10} /></button>
                   <button className="file-action-btn" onClick={e => { e.stopPropagation(); deleteItem(child.id, child.name, true); }}><Trash2 size={10} /></button>
                 </>
@@ -215,7 +219,7 @@ function TreeNode({ node, depth, openFile, activeFile, expanded, toggleExpand, s
               {isOpen && <TreeNode node={child} depth={depth + 1} openFile={openFile} activeFile={activeFile}
                 expanded={expanded} toggleExpand={toggleExpand} startRename={startRename} deleteItem={deleteItem}
                 renamingFile={renamingFile} renameValue={renameValue} setRenameValue={setRenameValue}
-                submitRename={submitRename} renameInputRef={renameInputRef} />}
+                submitRename={submitRename} renameInputRef={renameInputRef} newItemIn={newItemIn} />}
             </div>
           </React.Fragment>
         );
@@ -276,20 +280,31 @@ export default function IDE() {
   const [openFiles, setOpenFiles] = useState<Record<string, OpenFile>>({});
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
+  const activeFileRef = useRef<string | null>(null);
+  activeFileRef.current = activeFile;
   const [lastRunFile, setLastRunFile] = useState<string | null>(null);
   const [dockerStatus, setDockerStatus] = useState<'unknown' | 'checking' | 'running' | 'idle' | 'error'>('unknown');
   const [containers, setContainers] = useState<Array<{ Id: string; Names?: string[]; State: string }>>([]);
   const [activityPanel, setActivityPanel] = useState<'explorer' | 'search' | 'source' | 'debug' | 'docker' | 'extensions' | 'settings'>('explorer');
   const [bottomTab, setBottomTab] = useState<'terminal' | 'problems' | 'output' | 'chaos'>('terminal');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
-  const [runOutput, setRunOutput] = useState('');
-  const [selectedModel, setSelectedModel] = useState('gemini-flash-lite-latest');
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('orbit_model') || 'claude-opus-5-5');
+  const [aiModels, setAiModels] = useState<{ id: string; label: string; sub: string }[]>([]);
+  const [aiEnabled, setAiEnabled] = useState(true);
+  const [backendIssue, setBackendIssue] = useState<null | 'unreachable' | 'outdated' | 'db' | 'ai'>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [sandboxId, setSandboxId] = useState<string | null>(null);
   const [deployState, setDeployState] = useState<'idle' | 'deploying' | 'deployed' | 'error'>('idle');
   const [deployUrl, setDeployUrl] = useState<string>('');
   const [deployContainerId, setDeployContainerId] = useState<string>('');
   const [previewPorts, setPreviewPorts] = useState<Record<string, string>>({});
+  const [previewSrc, setPreviewSrc] = useState('');
+  const [previewNonce, setPreviewNonce] = useState(0);
+  useEffect(() => {
+    const urls = Object.values(previewPorts);
+    if (!urls.includes(previewSrc)) setPreviewSrc(previewPorts['terminal'] || previewPorts['8080'] || previewPorts['3000'] || urls[0] || '');
+  }, [previewPorts, previewSrc]);
   const [isChaosRunning, setIsChaosRunning] = useState(false);
   const [chaosResults, setChaosResults] = useState<ChaosResponse | null>(null);
   const [problems, setProblems] = useState<Problem[]>([]);
@@ -307,6 +322,11 @@ export default function IDE() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectTemplate, setNewProjectTemplate] = useState('python');
+  const [templates, setTemplates] = useState<{ id: string; label: string }[]>([]);
+  useEffect(() => {
+    apiFetch('/api/projects/templates').then(r => r.json()).then(d => setTemplates(d.templates || [])).catch(() => {});
+  }, []);
   const [fontSize, setFontSize] = useState(14);
   const [codeFont, setCodeFont] = useState(CODE_FONTS[0].family);
   const [minimapEnabled, setMinimapEnabled] = useState(true);
@@ -317,20 +337,18 @@ export default function IDE() {
   const [debugSession, setDebugSession] = useState(false);
   const [extensionStates, setExtensionStates] = useState<Record<string, boolean>>({ prettier: true, eslint: true, gitlens: false, aiAssistant: true });
   const [projectInsights, setProjectInsights] = useState({ fileCount: 0, lineCount: 0, todoCount: 0, largeFiles: [] as string[] });
-  const [terminalMode, setTerminalMode] = useState<'bash' | 'zsh' | 'sh'>('bash');
-  const [terminalCommand, setTerminalCommand] = useState('');
-  const xtermRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<any>(null);
-  const xtermSplitRef = useRef<Terminal | null>(null);
-  const fitSplitRef = useRef<any>(null);
-  const terminalRef = useRef<HTMLDivElement | null>(null);
-  const splitRef = useRef<HTMLDivElement | null>(null);
-  const socketRef = useRef<any>(null);
-  const [isSplit, setIsSplit] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', content: "I'm your AI coding agent.\n\nTry:\n• \"create a REST API with auth\"\n• \"fix the errors in this file\"\n• \"run this file\"\n• \"explain this code\"\n\nI can create entire multi-file projects in one shot." },
-  ]);
+  const terminalPanelRef = useRef<TerminalPanelHandle | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const runOutputRef = useRef('');
+  const stoppedByUserRef = useRef(false);
+  const lastRunRef = useRef<{ fileId: string; path: string; language: string } | null>(null);
+  const [gitDiff, setGitDiff] = useState<{ path: string; diff: string } | null>(null);
+  const [newItemParent, setNewItemParent] = useState('');
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: WELCOME_MESSAGE }]);
   const [autoDebugEnabled, setAutoDebugEnabled] = useState(true);
+  const [runFailure, setRunFailure] = useState<{ code: number; output: string } | null>(null);
   const [debugHistory, setDebugHistory] = useState<DebugHistoryEntry[]>([]);
   const [chatSessions, setChatSessions] = useState<{ id: string, name: string }[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -341,16 +359,22 @@ export default function IDE() {
   const [aiTab, setAiTab] = useState<'chat' | 'history'>('chat');
   const [showAIPanel, setShowAIPanel] = useState(false);
   const autoDebugAttempts = useRef(0);
+  const aiCompleteRef = useRef(false);
+  const sendChatRef = useRef<((text?: string, selection?: string) => void) | null>(null);
+  const pendingSelectionRef = useRef('');
 
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
-  const [pendingAIAction, setPendingAIAction] = useState<{
-    action: 'apply' | 'scaffold' | 'delete',
-    data: any,
-    summary: string,
-    originalCode?: string,
-  } | null>(null);
+  const [pendingAIAction, setPendingAIAction] = useState<PendingChanges | null>(null);
+  const [reviewFile, setReviewFile] = useState<string | null>(null);
+  const [reviewSeq, setReviewSeq] = useState(0);
+  // Dispose the diff models of a finished review (they're kept alive while mounted, see DiffEditor).
+  const disposeReviewModels = useCallback(() => {
+    const m = monacoRef.current;
+    m?.editor.getModels().forEach((model: any) => { if (model.uri.toString().includes(`review-${reviewSeq}-`)) setTimeout(() => model.dispose(), 0); });
+    setReviewSeq(s => s + 1);
+  }, [reviewSeq]);
 
 
   const saveTimeout = useRef<number | null>(null);
@@ -364,34 +388,18 @@ export default function IDE() {
   const yProviderRef = useRef<any>(null);
   const yBindingRef = useRef<any>(null);
 
-  const createTerminalInstance = useCallback((container: HTMLDivElement, connectSocket = true) => {
-    const term = new Terminal({
-      cursorBlink: true,
-      fontSize: 13,
-      fontFamily: codeFont,
-      theme: { background: '#1e1e1e', foreground: '#cccccc', cursor: '#cccccc', selectionBackground: '#264f78' },
-    });
-    const fit = new FitAddon();
-    const webLinks = new WebLinksAddon();
-    term.loadAddon(fit);
-    term.loadAddon(webLinks);
-    term.open(container);
-    fit.fit();
-    if (connectSocket) term.onData(d => socketRef.current?.emit('terminal-input', d));
-    const obs = new ResizeObserver(() => fit.fit());
-    obs.observe(container);
-    return { term, fit, obs };
-  }, [codeFont]);
+  // Writes a line to the Run tab of the terminal panel.
+  const runLog = useCallback((text: string) => terminalPanelRef.current?.writeRun(`${text}\r\n`), []);
 
   const fetchProjects = useCallback(async () => {
-    const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects`, { headers: authHeader() });
+    const res = await apiFetch(`/api/projects`, { headers: authHeader() });
     const data = await res.json();
     setProjects(data.projects || []);
     return data.projects || [];
   }, []);
 
   const loadProject = useCallback(async (projectId) => {
-    const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${projectId}`, { headers: authHeader() });
+    const res = await apiFetch(`/api/projects/${projectId}`, { headers: authHeader() });
     const data = await res.json();
     setProject(data.project);
     setAllFiles(data.project.files);
@@ -407,42 +415,66 @@ export default function IDE() {
   }, []);
 
   useEffect(() => {
-    fetchProjects();
+    fetchProjects().then((list) => {
+      // Reopen the most recent project instead of landing on an empty screen.
+      if (list.length && !project) loadProject(list[0].id);
+    });
+    // Detect a backend that's unreachable or still running old code.
+    apiFetch('/api/health').then(async (r) => {
+      const data = await r.json().catch(() => null);
+      if (!data || !data.version) setBackendIssue('outdated');
+      else if (!data.db) setBackendIssue('db');
+      else if (!data.ai) setBackendIssue('ai');
+      else setBackendIssue(null);
+    }).catch(() => setBackendIssue('unreachable'));
+    apiFetch('/api/ai/models').then(r => r.json()).then((data) => {
+      setAiEnabled(!!data.enabled);
+      setAiModels(data.models || []);
+      if (data.models?.length && !data.models.some(m => m.id === localStorage.getItem('orbit_model'))) setSelectedModel(data.models[0].id);
+    }).catch(() => setAiEnabled(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => { localStorage.setItem('orbit_model', selectedModel); }, [selectedModel]);
 
   useEffect(() => {
     document.documentElement.style.setProperty('--code-font', codeFont);
   }, [codeFont]);
 
-  const bindYjs = useCallback((editor: any, monaco: any, fileId: string) => {
+  const yRoomRef = useRef<{ room: string; model: any } | null>(null);
+  const bindYjs = useCallback((editor: any, _monaco: any, fileId: string) => {
     if (!project) return;
-    if (yBindingRef.current) yBindingRef.current.destroy();
-    if (yProviderRef.current) yProviderRef.current.destroy();
-    if (ydocRef.current) ydocRef.current.destroy();
-
-    const ydoc = new Y.Doc();
-    ydocRef.current = ydoc;
-
-    const roomName = `${project.id}-${fileId}`;
-    const provider = new WebsocketProvider('ws://localhost:5001', roomName, ydoc);
-    yProviderRef.current = provider;
-
-    const ytext = ydoc.getText('monaco');
     const model = editor.getModel();
+    const roomName = `${project.id}-${fileId}`;
+    // Already bound to this file's model (onMount and the activeFile effect both call us).
+    if (yRoomRef.current && yRoomRef.current.room === roomName && yRoomRef.current.model === model) return;
+
+    // Tear down the previous binding completely. (Not clearing these refs used to leave the
+    // new connection thinking a binding already existed, so it never attached.)
+    yBindingRef.current?.destroy();
+    yProviderRef.current?.destroy();
+    ydocRef.current?.destroy();
+    yBindingRef.current = null;
+    yProviderRef.current = null;
+    ydocRef.current = null;
+    yRoomRef.current = null;
     if (!model) return;
 
-    // Wait for the initial sync from the server before binding Monaco,
-    // so that the editor isn't wiped by an initially empty local ytext.
-    provider.on('synced', () => {
-      if (!yBindingRef.current) {
-        // If the server was completely empty (e.g., new file) but we have local content from Postgres,
-        // hydrate the CRDT before binding to prevent wiping the editor.
-        if (ytext.length === 0 && model.getValue().length > 0) {
-          ytext.insert(0, model.getValue());
-        }
-        const binding = new MonacoBinding(ytext, model, new Set([editor]), provider.awareness);
-        yBindingRef.current = binding;
-      }
+    const ydoc = new Y.Doc();
+    const provider = new WebsocketProvider(`${WS_URL}/yjs`, roomName, ydoc, { params: { token: getToken() || '' } });
+    ydocRef.current = ydoc;
+    yProviderRef.current = provider;
+    yRoomRef.current = { room: roomName, model };
+    const ytext = ydoc.getText('monaco');
+
+    // Wait for the initial sync from the server before binding Monaco, so the editor
+    // isn't wiped by an initially empty local ytext. 'synced' fires again on reconnect.
+    provider.on('synced', (isSynced: boolean) => {
+      if (!isSynced || yProviderRef.current !== provider || yBindingRef.current) return;
+      if (model.isDisposed?.()) return;
+      // A room nobody has opened yet is empty: seed it with what the editor shows.
+      if (ytext.length === 0 && model.getValue().length > 0) ytext.insert(0, model.getValue());
+      yBindingRef.current = new MonacoBinding(ytext, model, new Set([editor]), provider.awareness);
     });
   }, [project]);
 
@@ -452,145 +484,47 @@ export default function IDE() {
     }
   }, [activeFile, bindYjs]);
 
+  // One authenticated socket for terminals, program I/O and live file updates.
   useEffect(() => {
-    // Unconditionally establish the WebSocket connection so it's always ready
-    socketRef.current = io(import.meta.env.VITE_API_URL || 'http://localhost:5000');
-
-    let primary: any = null;
-    // Only instantiate the terminal UI on mount if the DOM ref is ready
-    if (terminalRef.current) {
-      primary = createTerminalInstance(terminalRef.current, true);
-      xtermRef.current = primary.term;
-      fitRef.current = primary.fit;
-    }
-
-    socketRef.current.on('terminal-output', d => {
-      xtermRef.current?.write(d);
-      xtermSplitRef.current?.write(d);
+    const s = io(backendUrl(''), { auth: { token: getToken() }, transports: ['websocket', 'polling'] });
+    socketRef.current = s;
+    setSocket(s);
+    s.on('connect', () => setSocketConnected(true));
+    s.on('disconnect', () => setSocketConnected(false));
+    s.on('connect_error', (err) => {
+      setSocketConnected(false);
+      if (err.message === 'unauthorized') { clearAuth(); navigate('/login'); }
     });
-    socketRef.current.on('sandbox-output', d => {
-      xtermRef.current?.write(d);
+    s.on('sandbox-output', (d: string) => {
+      runOutputRef.current = (runOutputRef.current + d).slice(-20000);
     });
-    socketRef.current.on('sandbox-exit', ({ code, error }) => {
-      if (error) {
-        xtermRef.current?.writeln(`\r\n\x1b[31m✖ Sandbox exited with error: ${error}\x1b[0m`);
-      } else {
-        xtermRef.current?.writeln(`\r\n\x1b[36m✔ Sandbox finished execution.\x1b[0m`);
-      }
+    s.on('sandbox-exit', ({ code, error }: { code?: number; error?: string }) => {
+      if (error) runLog(`\r\n\x1b[31m✖ Sandbox exited with error: ${error}\x1b[0m`);
+      else runLog(`\r\n\x1b[${code === 0 ? '36m✔ Program finished' : `31m✖ Program exited with code ${code}`}\x1b[0m`);
       setIsRunning(false);
       setSandboxId(null);
+      if (code && code !== 0 && !stoppedByUserRef.current) setRunFailure({ code, output: runOutputRef.current });
+      stoppedByUserRef.current = false;
     });
-    
-    socketRef.current.on('sandbox-ports', (ports: Record<string, string>) => {
+    s.on('sandbox-ports', (ports: Record<string, string>) => {
+      const urls = Object.fromEntries(Object.entries(ports).map(([port, path]) => [port, backendUrl(path)]));
       setPreviewPorts(prev => {
-        if (JSON.stringify(prev) === JSON.stringify(ports)) return prev;
-        xtermRef.current?.writeln(`\r\n\x1b[35m► App listening on mapped ports: ${JSON.stringify(ports)}\x1b[0m`);
-        Object.values(ports).forEach((port: any) => {
-          xtermRef.current?.writeln(`\x1b[34m► Preview: http://localhost:${port}\x1b[0m`);
-        });
+        if (JSON.stringify(prev) === JSON.stringify(urls)) return prev;
+        Object.entries(urls).forEach(([port, url]) => runLog(`\x1b[35m► App listening on port ${port} — preview: ${url}\x1b[0m`));
         setOpenTabs(t => t.includes('__preview__') ? t : [...t, '__preview__']);
-        return ports;
+        setActiveFile('__preview__');
+        return urls;
       });
     });
-
-    socketRef.current.on('terminal-ready', ({ shell }) => {
-      xtermRef.current?.writeln(`\r\n\x1b[36mConnected to ${shell} shell.\x1b[0m`);
-    });
-    socketRef.current.on('connect', () => setDockerStatus('checking'));
-
-    xtermRef.current?.writeln('\r\n\x1b[32muser@ai-cloud-ide:~$ \x1b[0m');
-    xtermRef.current?.writeln('\x1b[36mTip: press Ctrl+` to open the terminal.\x1b[0m');
-
-    return () => {
-      primary?.obs.disconnect();
-      socketRef.current?.disconnect();
-      primary?.term.dispose();
-      xtermSplitRef.current?.dispose();
-    };
-  }, [createTerminalInstance]);
-
-  // Ensure terminal is resized when tab is opened
-  useEffect(() => {
-    if (bottomTab === 'terminal') {
-      setTimeout(() => {
-        fitRef.current?.fit();
-        fitSplitRef.current?.fit();
-      }, 50);
-    }
-  }, [bottomTab]);
-
-  const newTerminal = () => {
-    if (xtermSplitRef.current) {
-      xtermSplitRef.current.dispose();
-      xtermSplitRef.current = null;
-      setIsSplit(false);
-    }
-    
-    if (!xtermRef.current && terminalRef.current) {
-      const primary = createTerminalInstance(terminalRef.current, true);
-      xtermRef.current = primary.term;
-      fitRef.current = primary.fit;
-    }
-    
-    if (xtermRef.current) {
-      xtermRef.current.clear();
-      xtermRef.current.writeln('\r\n\x1b[36mNew terminal session started.\x1b[0m');
-    }
-    socketRef.current?.emit('terminal-restart', { shell: terminalMode });
-  };
-
-  // Use effect to create the split terminal after the split container mounts
-  useEffect(() => {
-    if (!isSplit) {
-      // dispose existing split terminal if any
-      if (xtermSplitRef.current) {
-        xtermSplitRef.current.dispose();
-        xtermSplitRef.current = null;
-      }
-      return;
-    }
-    const container = splitRef.current;
-    if (!container) {
-      xtermRef.current?.writeln('\r\n\x1b[31mCould not create split terminal: container not ready.\x1b[0m');
-      return;
-    }
-    const { term, fit, obs } = createTerminalInstance(container, true);
-    term.writeln('\r\n\x1b[36mSplit terminal ready — shares session with primary pane.\x1b[0m');
-    xtermSplitRef.current = term;
-    fitSplitRef.current = fit;
-    return () => {
-      obs.disconnect();
-      xtermSplitRef.current?.dispose();
-      xtermSplitRef.current = null;
-    };
-  }, [isSplit, createTerminalInstance]);
-
-  const splitTerminal = () => {
-    setIsSplit(v => !v);
-    // message handled in effect
-  };
-
-  const killTerminal = () => {
-    if (xtermSplitRef.current) {
-      xtermSplitRef.current.dispose();
-      xtermSplitRef.current = null;
-      setIsSplit(false);
-      xtermRef.current?.writeln('\r\n\x1b[31mKilled split terminal.\x1b[0m');
-      return;
-    }
-    if (xtermRef.current) {
-      xtermRef.current.dispose();
-      xtermRef.current = null;
-      // create a lightweight placeholder so UI doesn't break
-      setTimeout(() => newTerminal(), 200);
-    }
-  };
+    return () => { s.disconnect(); socketRef.current = null; setSocket(null); };
+  }, [runLog, navigate]);
 
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/containers/list`);
+        const res = await apiFetch(`/api/containers/list`);
         const data = await res.json();
+        if (!res.ok) { setDockerStatus('error'); return; }
         setContainers(data.containers || []);
         setDockerStatus(data.containers?.filter(c => c.State === 'running').length ? 'running' : 'idle');
       } catch { setDockerStatus('error'); }
@@ -607,9 +541,10 @@ export default function IDE() {
       if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); setActivityPanel('explorer'); setShowNewItem('file'); }
       if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); setGotoLineOpen(true); setGotoLineValue(''); }
       if (e.key === 'Escape') { setPaletteOpen(false); setRenamingFile(null); setShowProjectPicker(false); setGotoLineOpen(false); }
-      if (mod && e.key === 's') { e.preventDefault(); if (activeFile && openFiles[activeFile]) { saveFile(activeFile, openFiles[activeFile].value); } }
+      if (mod && e.key === 's') { e.preventDefault(); if (activeFile && openFiles[activeFile]) { clearTimeout(saveTimeout.current); saveFile(activeFile, openFiles[activeFile].value, true); } }
+      if (mod && e.key.toLowerCase() === 'i' && !e.shiftKey) { e.preventDefault(); setShowAIPanel(true); setTimeout(() => (document.querySelector('.chat-input') as HTMLTextAreaElement | null)?.focus(), 50); }
       if (mod && e.key === 'w') { e.preventDefault(); if (activeFile) closeTab(activeFile, { stopPropagation: () => { } }); }
-      if (mod && e.key === '`') { e.preventDefault(); setBottomTab('terminal'); }
+      if (mod && e.key === '`') { e.preventDefault(); setBottomTab('terminal'); terminalPanelRef.current?.showShell(); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -653,7 +588,7 @@ export default function IDE() {
     setActivityPanel('debug');
     setBottomTab('terminal');
     setDebugSession(true);
-    xtermRef.current?.writeln('\r\n\x1b[36m▶ Debugger is ready. Set breakpoints and run your file.\x1b[0m');
+    runLog('\x1b[36m▶ Debugger is ready. Run your file with F5.\x1b[0m');
     setChatMessages(m => [...m, { role: 'assistant', content: 'Debugger ready. Use F5 or the Run button to start a session.' }]);
   };
 
@@ -661,84 +596,9 @@ export default function IDE() {
     setExtensionStates(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const runAIOptimizer = async () => {
+  const runAIOptimizer = () => {
     if (!activeFile || !openFiles[activeFile]) return;
-    const file = openFiles[activeFile];
-    setChatLoading(true);
-    setChatMessages(m => [...m, { role: 'user', content: `Optimize ${file.name} for readability and performance.` }]);
-    try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: `Optimize this ${file.language} file for readability and performance. Return the complete improved file.` }],
-          fileTree: allFiles.map(f => ({ name: f.name, path: f.path, isFolder: f.isFolder })),
-          activeFile: { name: file.name, path: file.path, content: file.value },
-          model: selectedModel
-        }),
-      });
-      const data = await res.json();
-      if (data.action === 'apply' && data.code) {
-        setOpenFiles(f => ({ ...f, [activeFile]: { ...f[activeFile], value: data.code } }));
-        await saveFile(activeFile, data.code);
-        setChatMessages(m => [...m, { role: 'assistant', content: `✔ Optimized ${file.name} and applied changes.\n${data.reply || ''}` }]);
-      } else {
-        setChatMessages(m => [...m, { role: 'assistant', content: data.reply || data.error || 'Optimization complete.' }]);
-      }
-    } catch {
-      setChatMessages(m => [...m, { role: 'assistant', content: '⚠ AI optimizer unavailable — check backend.' }]);
-    } finally { setChatLoading(false); }
-  };
-
-  const clearTerminal = () => {
-    if (xtermRef.current) {
-      xtermRef.current.clear();
-      xtermRef.current.writeln('\r\n\x1b[36mTerminal cleared. Ready for commands.\x1b[0m');
-    }
-  };
-
-  const toggleTerminalMode = () => {
-    const next = terminalMode === 'bash' ? 'zsh' : terminalMode === 'zsh' ? 'sh' : 'bash';
-    setTerminalMode(next);
-    socketRef.current?.emit('terminal-restart', { shell: next });
-    xtermRef.current?.writeln(`\r\n\x1b[36mRestarting terminal with ${next} shell...\x1b[0m`);
-    if (xtermSplitRef.current) xtermSplitRef.current.writeln(`\r\n\x1b[36mRestarting terminal with ${next} shell...\x1b[0m`);
-  };
-
-  const executeTerminalCommand = () => {
-    const command = terminalCommand.trim();
-    if (!command || !xtermRef.current) return;
-    xtermRef.current.writeln(`\r\n\x1b[32muser@ai-cloud-ide:~$ \x1b[0m${command}`);
-    if (command === 'clear') {
-      clearTerminal();
-    } else if (command === 'help') {
-      xtermRef.current.writeln('Available editor commands: clear, run, open <file>, search <term>, help');
-    } else if (command === 'run') {
-      runFile(activeFile);
-    } else if (command.startsWith('open ')) {
-      const name = command.slice(5).trim();
-      const target = allFiles.find(f => f.name === name && !f.isFolder);
-      if (target) { openFile(target); xtermRef.current.writeln(`Opened ${name}.`); }
-      else xtermRef.current.writeln(`File not found: ${name}`);
-    } else if (command.startsWith('search ')) {
-      const query = command.slice(7).trim();
-      setSearchQuery(query); setActivityPanel('search');
-      xtermRef.current.writeln(`Searching open files for: ${query}`);
-    } else if (command === 'toggle minimap') {
-      setMinimapEnabled(v => {
-        const next = !v;
-        xtermRef.current?.writeln(`Minimap ${next ? 'enabled' : 'disabled'}.`);
-        return next;
-      });
-    } else {
-      xtermRef.current.writeln('Unknown command. Type help for editor actions.');
-    }
-    setTerminalCommand('');
-  };
-
-  const handleTerminalCommandKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      executeTerminalCommand();
-    }
+    sendChatMessage(`Optimize ${relPath(openFiles[activeFile])} for readability and performance without changing its behavior.`);
   };
 
   const openSettings = () => setActivityPanel('settings');
@@ -762,12 +622,12 @@ export default function IDE() {
     const action = state === 'running' ? 'stop' : 'start';
     setContainerAction(id);
     try {
-      await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/containers/${id}/${action}`, { method: 'POST' });
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/containers/list`);
+      await apiFetch(`/api/containers/${id}/${action}`, { method: 'POST' });
+      const res = await apiFetch(`/api/containers/list`);
       const data = await res.json();
       setContainers(data.containers || []);
     } catch {
-      xtermRef.current?.writeln(`\r\n\x1b[31mFailed to ${action} container.\x1b[0m`);
+      runLog(`\x1b[31mFailed to ${action} container.\x1b[0m`);
     } finally { setContainerAction(null); }
   };
 
@@ -799,12 +659,12 @@ export default function IDE() {
     if (activeFile === id) setActiveFile(next[next.length - 1] || null);
   };
 
-  const saveFile = useCallback(async (fileId: string | null, content: string) => {
-    if (!project || !fileId) return;
+  const saveFile = useCallback(async (fileId: string | null, content: string, format = false) => {
+    if (!project || !fileId || fileId === '__preview__') return;
     setSaveStatus('saving');
 
     let finalContent = content;
-    if (extensionStates['prettier']) {
+    if (format && extensionStates['prettier']) {
       try {
         const file = allFiles.find(f => f.id === fileId);
         if (file) {
@@ -832,8 +692,11 @@ export default function IDE() {
 
           if (parser) {
             finalContent = await prettier.format(content, { parser, plugins, singleQuote: true });
-            if (finalContent !== content && activeFile === fileId) {
+            if (finalContent !== content) {
               setOpenFiles(f => ({ ...f, [fileId]: { ...f[fileId], value: finalContent } }));
+              // Push the formatted text through the editor so Yjs collaborators see it too.
+              const model = activeFile === fileId ? editorRef.current?.getModel() : null;
+              if (model) model.pushEditOperations([], [{ range: model.getFullModelRange(), text: finalContent }], () => null);
             }
           }
         }
@@ -841,15 +704,15 @@ export default function IDE() {
     }
 
     try {
-      await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${fileId}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json', ...authHeader() },
-        body: JSON.stringify({ content: finalContent }),
+      const res = await apiFetch(`/api/projects/${project.id}/files/${fileId}`, {
+        method: 'PUT', body: JSON.stringify({ content: finalContent }),
       });
-      setSaveStatus('saved');
+      setSaveStatus(res.ok ? 'saved' : 'unsaved');
+      if (res.ok) setAllFiles(prev => prev.map(f => (f.id === fileId ? { ...f, content: finalContent } : f)));
     } catch { setSaveStatus('unsaved'); }
   }, [project, extensionStates, allFiles, activeFile]);
 
-  const [gitStatus, setGitStatus] = useState<string>('');
+  const [gitStatus, setGitStatus] = useState<{ branch: string; files: { status: string; path: string }[] }>({ branch: '', files: [] });
   const [gitLogs, setGitLogs] = useState<any[]>([]);
   const [gitCommitMsg, setGitCommitMsg] = useState('');
   const [isGitLoading, setIsGitLoading] = useState(false);
@@ -857,11 +720,11 @@ export default function IDE() {
   const refreshGit = useCallback(async () => {
     if (!project) return;
     try {
-      const statusRes = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/git/status`, { headers: authHeader() });
+      const statusRes = await apiFetch(`/api/projects/${project.id}/git/status`, { headers: authHeader() });
       const statusData = await statusRes.json();
-      setGitStatus(statusData.status || '');
+      setGitStatus({ branch: statusData.branch || '', files: statusData.files || [] });
 
-      const logRes = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/git/log`, { headers: authHeader() });
+      const logRes = await apiFetch(`/api/projects/${project.id}/git/log`, { headers: authHeader() });
       const logData = await logRes.json();
       setGitLogs(logData.logs || []);
     } catch (e) { console.error('Git error', e); }
@@ -871,11 +734,13 @@ export default function IDE() {
     if (!project || !gitCommitMsg.trim()) return;
     setIsGitLoading(true);
     try {
-      await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/git/commit`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-        body: JSON.stringify({ message: gitCommitMsg })
+      const res = await apiFetch(`/api/projects/${project.id}/git/commit`, {
+        method: 'POST', body: JSON.stringify({ message: gitCommitMsg })
       });
-      setGitCommitMsg('');
+      const data = await res.json();
+      if (data.nothingToCommit) alert('Nothing to commit — working tree is clean.');
+      else if (!data.success) alert(`Commit failed: ${data.error || 'unknown error'}`);
+      else setGitCommitMsg('');
       await refreshGit();
     } catch (e) { console.error('Commit failed', e); }
     finally { setIsGitLoading(false); }
@@ -895,14 +760,14 @@ export default function IDE() {
     saveTimeout.current = setTimeout(() => saveFile(activeFile, value), 800);
 
     // Live Linting
-    if (extensionStates['eslint'] && project) {
+    if (extensionStates['eslint'] && project && /\.(m?jsx?|cjs)$/i.test(openFiles[activeFile]?.name || '')) {
       clearTimeout(lintTimeout.current);
       lintTimeout.current = setTimeout(async () => {
         try {
-          const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/lint`, {
+          const res = await apiFetch(`/api/projects/${project.id}/lint`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...authHeader() },
-            body: JSON.stringify({ code: value })
+            body: JSON.stringify({ code: value, fileName: openFiles[activeFile]?.name || 'file.js' })
           });
           const data = await res.json();
           const markers = (data.results?.[0]?.messages || []).map((msg: any) => ({
@@ -928,22 +793,77 @@ export default function IDE() {
     }
   };
 
-  const refreshTree = useCallback(async () => {
+  const refreshTree = useCallback(async (): Promise<FileEntry[] | undefined> => {
     if (!project) return;
-    const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}`, { headers: authHeader() });
+    const res = await apiFetch(`/api/projects/${project.id}`);
+    if (!res.ok) return;
     const data = await res.json();
-    setAllFiles(data.project.files);
+    const files: FileEntry[] = data.project.files;
+    setAllFiles(files);
+    return files;
   }, [project]);
+
+  // The editor is uncontrolled (a controlled `value` drops keystrokes when React lags behind
+  // fast typing), so content changed from outside has to be pushed into Monaco's model.
+  // The active file is skipped while Yjs is bound: the server already updates it through Yjs.
+  const syncModel = useCallback((fileId: string, content: string) => {
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+    if (fileId === activeFileRef.current && yBindingRef.current) return;
+    const model = monaco.editor.getModel(monaco.Uri.parse(fileId));
+    if (model && model.getValue() !== content) model.setValue(content);
+  }, []);
+
+  // Files changed outside the editor (terminal, git, AI): refresh the tree and any open
+  // tabs that aren't being edited (the active one is kept in sync by Yjs).
+  useEffect(() => {
+    if (!socket || !project) return;
+    const onChanged = async ({ projectId }: { projectId: string }) => {
+      if (projectId !== project.id) return;
+      const files = await refreshTree();
+      if (!files) return;
+      setOpenFiles(prev => {
+        const next = { ...prev };
+        for (const id of Object.keys(prev)) {
+          const fresh = files.find(f => f.id === id);
+          if (!fresh) { delete next[id]; continue; }
+          if (id !== activeFileRef.current) {
+            next[id] = { ...prev[id], value: fresh.content };
+            syncModel(id, fresh.content);
+          }
+        }
+        return next;
+      });
+      setOpenTabs(t => t.filter(id => id === '__preview__' || files.some(f => f.id === id)));
+    };
+    socket.on('files-changed', onChanged);
+    return () => { socket.off('files-changed', onChanged); };
+  }, [socket, project, refreshTree, syncModel]);
+
+  const importFromWorkspace = async () => {
+    if (!project) return;
+    await apiFetch(`/api/projects/${project.id}/workspace/import`, { method: 'POST' });
+    await refreshTree();
+  };
+
+  const downloadProject = async () => {
+    if (!project) return;
+    const res = await apiFetch(`/api/projects/${project.id}/download`);
+    if (!res.ok) { alert('Download failed.'); return; }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${project.name}.tar.gz`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
 
   const stopSandbox = useCallback(async () => {
     if (!sandboxId) return;
-    xtermRef.current?.writeln('\r\n\x1b[33m► Stopping sandbox...\x1b[0m');
+    stoppedByUserRef.current = true;
+    runLog('\x1b[33m► Stopping program...\x1b[0m');
     try {
-      await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/run/stop`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ containerId: sandboxId })
-      });
-      xtermRef.current?.writeln('\x1b[33m► Sandbox stopped.\x1b[0m');
+      await apiFetch(`/api/run/stop`, { method: 'POST', body: JSON.stringify({ containerId: sandboxId }) });
     } catch (e) {
       console.error(e);
     } finally {
@@ -951,35 +871,38 @@ export default function IDE() {
       setSandboxId(null);
       setPreviewPorts({});
     }
-  }, [sandboxId]);
+  }, [sandboxId, runLog]);
 
-  const runFile = useCallback(async (fileId?: string, isAutoRetry = false) => {
+  const relPath = (f: { path?: string; name: string }) => (f.path ? `${f.path}/${f.name}` : f.name);
+
+  const runFile = useCallback(async (fileId?: string | null, fromAutoDebug = false) => {
+    if (!fromAutoDebug) autoDebugAttempts.current = 0;
     let id = fileId ?? activeFile;
-    const hasIndexHtml = allFiles.find(f => f.name === 'index.html');
-    const hasPackageJson = allFiles.find(f => f.name === 'package.json');
-    if (hasIndexHtml && !hasPackageJson) {
-      id = hasIndexHtml.id;
-    } else if (id === '__preview__' || !id) {
-      id = lastRunFile || hasIndexHtml?.id || allFiles.find(f => f.name === 'server.js' || f.name === 'app.js' || f.name === 'main.py' || !f.isFolder)?.id;
+    const hasIndexHtml = allFiles.find(f => f.name === 'index.html' && !f.path);
+    const hasPackageJson = allFiles.find(f => f.name === 'package.json' && !f.path);
+    if (!id || id === '__preview__') {
+      id = lastRunFile || allFiles.find(f => ['server.js', 'app.js', 'index.js', 'main.py', 'app.py'].includes(f.name))?.id || hasIndexHtml?.id;
     }
+    // A static site with no package.json is served as a whole from index.html.
+    const asHtml = allFiles.find(f => f.id === id)?.name.endsWith('.html') || (hasIndexHtml && !hasPackageJson && !RUNNABLE_LANGS.includes(getLang(allFiles.find(f => f.id === id)?.name)));
+    if (asHtml && hasIndexHtml) id = hasIndexHtml.id;
     if (!id || id === '__preview__') return;
+    const entry = allFiles.find(x => x.id === id);
+    if (!entry || entry.isFolder) return;
     setLastRunFile(id);
-    let file = openFiles[id];
-    if (!file) {
-      const f = allFiles.find(x => x.id === id);
-      if (!f) return;
-      file = { name: f.name, path: f.path, language: getLang(f.name), value: f.content };
-    }
+    const name = entry.name;
+    const language = asHtml ? 'html' : getLang(name);
 
-    if (!isAutoRetry) {
-      autoDebugAttempts.current = 0;
-    }
-
-    // Stop any existing sandbox first
     if (sandboxId) await stopSandbox();
+    stoppedByUserRef.current = false;
+    runOutputRef.current = '';
+    setRunFailure(null);
+    lastRunRef.current = { fileId: id, path: relPath(entry), language };
 
     setIsRunning(true); setBottomTab('terminal'); setPreviewPorts({});
-    xtermRef.current?.writeln(`\r\n\x1b[36m▶ Running ${file.name}...\x1b[0m`);
+    terminalPanelRef.current?.showRun();
+    terminalPanelRef.current?.clearRun();
+    runLog(`\x1b[36m▶ Running ${relPath(entry)}...\x1b[0m`);
     try {
       const projectFiles = allFiles.map(f => ({
         name: f.name,
@@ -987,57 +910,23 @@ export default function IDE() {
         isFolder: f.isFolder,
         content: f.isFolder ? '' : (openFiles[f.id]?.value ?? f.content)
       }));
-
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/run`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name, projectFiles, socketId: socketRef.current?.id }),
+      const res = await apiFetch(`/api/run`, {
+        method: 'POST',
+        body: JSON.stringify({ language, fileName: name, filePath: entry.path || '', projectFiles, socketId: socketRef.current?.id }),
       });
       const data = await res.json();
-
       if (data.containerId) {
         setSandboxId(data.containerId);
-
-        if (isAutoRetry) {
-          setDebugHistory(h => {
-            const next = [...h];
-            if (next.length > 0) next[next.length - 1].status = 'success';
-            return next;
-          });
-        }
-
-        // Ports will be populated dynamically via the 'sandbox-ports' websocket event
-        // based on active listeners inside the container
-        setPreviewPorts({});
         setOpenTabs(t => t.filter(x => x !== '__preview__'));
-      } else if (data.error) {
-        xtermRef.current?.writeln(`\r\n\x1b[31m✖ Sandbox error: ${data.error}\x1b[0m`);
+      } else {
+        runLog(`\x1b[31m✖ ${data.error || 'Could not start the program.'}\x1b[0m`);
         setIsRunning(false);
-
-        if (isAutoRetry) {
-          setDebugHistory(h => {
-            const next = [...h];
-            if (next.length > 0) next[next.length - 1].status = 'failed';
-            return next;
-          });
-        }
-
-        const isServerOrRateLimitError = res.status === 429 || res.status >= 500 || data.error.includes('Unsupported language');
-
-        if (autoDebugEnabled && !isServerOrRateLimitError) {
-          if (autoDebugAttempts.current < 3) {
-            autoDebugAttempts.current += 1;
-            autoDebug(file, data.error, autoDebugAttempts.current);
-          } else {
-            setChatMessages(m => [...m, { role: 'assistant', content: `Auto-debug couldn't fix this after 3 attempts. Here's the last error:\n\n\`\`\`\n${data.error}\n\`\`\`` }]);
-            setAiTab('chat');
-          }
-        }
       }
     } catch {
-      xtermRef.current?.writeln('\r\n\x1b[31m✖ Sandbox execution failed to start.\x1b[0m');
+      runLog('\x1b[31m✖ Could not reach the backend to run this file.\x1b[0m');
       setIsRunning(false);
     }
-  }, [activeFile, openFiles, allFiles, sandboxId, stopSandbox, autoDebugEnabled]);
+  }, [activeFile, openFiles, allFiles, sandboxId, stopSandbox, lastRunFile, runLog]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -1049,45 +938,54 @@ export default function IDE() {
     return () => window.removeEventListener('keydown', handler);
   }, [activeFile, debugSession, runFile]);
 
-  const autoDebug = async (file: any, errorOutput: string, attempt: number) => {
-    setChatMessages(m => [...m, { role: 'assistant', content: `⚠ Detected an error in ${file.name} (Attempt ${attempt}/3). Asking AI to auto-fix using the real error output...` }]);
+  // Ask Claude to fix a failed run, using the real program output. The fix is shown for review.
+  const autoDebug = async (failure: { code: number; output: string }) => {
+    const last = lastRunRef.current;
+    if (!project || !last) return;
+    const attempt = autoDebugAttempts.current + 1;
+    autoDebugAttempts.current = attempt;
+    const errorText = failure.output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').slice(-8000);
+    setShowAIPanel(true);
+    setAiTab('chat');
+    setChatMessages(m => [...m, { role: 'assistant', content: `⚠ \`${last.path}\` exited with code ${failure.code}. Asking Claude for a fix (attempt ${attempt})...` }]);
+    setChatLoading(true);
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/debug`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name, error: errorOutput }),
+      const res = await apiFetch(`/api/ai/debug`, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: project.id, filePath: last.path, language: last.language, code: openFiles[last.fileId]?.value, error: errorText }),
       });
       const data = await res.json();
-      if (data.scaffold) {
-        setChatMessages(m => [...m, { role: 'assistant', content: `✔ Auto-fixing by scaffolding dependencies.\n${data.explanation ? '\n' + data.explanation : ''}` }]);
-        setDebugHistory(h => [...h, { attempt, file: file.name, error: errorOutput, explanation: data.explanation, status: 'testing' }]);
-        await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project?.id}/scaffold`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-          body: JSON.stringify({ items: data.scaffold }),
-        });
-        await refreshTree();
-        runFile(file.id, true);
-      } else if (data.fixed) {
-        const fileInState = allFiles.find(f => f.name === file.name);
-        if (fileInState) {
-          const diffText = computeDiff(file.value, data.fixed);
-          setDebugHistory(h => [...h, { attempt, file: file.name, error: errorOutput, explanation: data.explanation, diff: diffText, status: 'testing' }]);
-          setOpenFiles(f => ({ ...f, [fileInState.id]: { ...f[fileInState.id], value: data.fixed } }));
-          await saveFile(fileInState.id, data.fixed);
-          setChatMessages(m => [...m, { role: 'assistant', content: `✔ Applied auto-fix for ${file.name}. Re-running to verify...` }]);
-          runFile(fileInState.id, true);
-        }
+      if (!res.ok) throw new Error(data.error);
+      setDebugHistory(h => [...h, { attempt, file: last.path, error: errorText, explanation: data.explanation, status: data.changes ? 'testing' : 'failed' }]);
+      if (data.changes) {
+        setPendingAIAction({ changes: data.changes, run: last.path, summary: data.explanation || 'Proposed fix', debugAttempt: attempt });
+      } else {
+        setChatMessages(m => [...m, { role: 'assistant', content: data.explanation || 'Claude could not find a fix.' }]);
       }
-    } catch {
-      setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Auto-debug failed — AI backend unavailable.' }]);
+    } catch (e: any) {
+      setChatMessages(m => [...m, { role: 'assistant', content: `⚠ Auto-debug failed: ${e.message || 'AI backend unavailable.'}` }]);
+    } finally {
+      setChatLoading(false);
     }
   };
+
+  // A run just failed: offer a fix automatically (up to 3 tries in a row) when auto-debug is on.
+  useEffect(() => {
+    if (!runFailure) return;
+    if (autoDebugEnabled && aiEnabled && autoDebugAttempts.current < 3) {
+      const f = runFailure;
+      setRunFailure(null);
+      autoDebug(f);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runFailure]);
 
   const runChaosTest = async () => {
     const file = openFiles[activeFile];
     if (!file) return;
     setIsChaosRunning(true); setChaosResults(null); setBottomTab('chaos');
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chaos`, {
+      const res = await apiFetch(`/api/chaos`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: file.value, language: file.language, fileName: file.name }),
       });
@@ -1099,77 +997,69 @@ export default function IDE() {
   };
 
   const approveAIAction = async () => {
-    console.log("Approve clicked", { pendingAIAction, project });
-    if (!pendingAIAction) return;
-    if (!project) {
-      alert("Project is not loaded properly. Please refresh the page.");
-      return;
-    }
-    const { action, data, summary } = pendingAIAction;
+    if (!pendingAIAction || !project) return;
+    const { changes, run, debugAttempt } = pendingAIAction;
     setPendingAIAction(null);
+    setReviewFile(null);
+    disposeReviewModels();
     try {
-      if (action === 'scaffold') {
-        setChatMessages(m => [...m, { role: 'assistant', content: summary || `Applying ${data.items.length} files...` }]);
-        const res2 = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/scaffold`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-          body: JSON.stringify({ items: data.items }),
+      if (changes?.writes.length) {
+        const items = changes.writes.map(w => {
+          const i = w.path.lastIndexOf('/');
+          return { name: i === -1 ? w.path : w.path.slice(i + 1), path: i === -1 ? '' : w.path.slice(0, i), isFolder: false, language: getLang(w.path), content: w.content };
         });
-        const json2 = await res2.json();
-        if (json2.files) {
-          setOpenFiles(f => {
-            const next = { ...f };
-            let lastFileId = null;
-            const newTabIds: string[] = [];
-            json2.files.forEach((file: any) => {
-              if (!file.isFolder) {
-                next[file.id] = { name: file.name, path: file.path, language: file.language, value: file.content };
-                lastFileId = file.id;
-                newTabIds.push(file.id);
-              }
-            });
-            if (newTabIds.length > 0) {
-              setOpenTabs(t => [...new Set([...t, ...newTabIds])]);
-              setTimeout(() => setActiveFile(lastFileId), 50);
-            }
-            return next;
-          });
+        const res = await apiFetch(`/api/projects/${project.id}/scaffold`, { method: 'POST', body: JSON.stringify({ items }) });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error);
+        const written: FileEntry[] = json.files || [];
+        setOpenFiles(f => {
+          const next = { ...f };
+          written.forEach(file => { next[file.id] = { name: file.name, path: file.path, language: getLang(file.name), value: file.content }; });
+          return next;
+        });
+        written.forEach(file => syncModel(file.id, file.content));
+        if (written.length) {
+          setOpenTabs(t => [...new Set([...t, ...written.map(w => w.id)])]);
+          setActiveFile(written[written.length - 1].id);
         }
-        await refreshTree();
-        setChatMessages(m => [...m, { role: 'assistant', content: `✔ Applied changes to ${data.items.length} files/folders.` }]);
-      } else if (action === 'apply') {
-        const target = allFiles.find(f => f.name === data.fileName && !f.isFolder);
-        if (target) {
-          await saveFile(target.id, data.code);
-          setChatMessages(m => [...m, { role: 'assistant', content: (summary || 'Applying changes...') + `\n\n✔ Applied to ${data.fileName}.` }]);
-        }
-      } else if (action === 'delete') {
-        setChatMessages(m => [...m, { role: 'assistant', content: summary || `Deleting ${data.items.length} files...` }]);
-        for (const filename of data.items) {
-          const target = allFiles.find(f => (f.path ? f.path + '/' : '') + f.name === filename || f.name === filename);
-          if (target) {
-            await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${target.id}`, { method: 'DELETE', headers: authHeader() });
-            setOpenFiles(f => { const n = { ...f }; delete n[target.id]; return n; });
-            setOpenTabs(t => t.filter(x => x !== target.id));
-            if (activeFile === target.id) setActiveFile(null);
-          }
-        }
-        await refreshTree();
-        setChatMessages(m => [...m, { role: 'assistant', content: `✔ Deleted ${data.items.length} files/folders.` }]);
       }
-    } catch {
-      setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Error applying AI changes.' }]);
+      for (const rel of changes?.deletes || []) {
+        const target = allFiles.find(f => relPath(f) === rel);
+        if (!target) continue;
+        await apiFetch(`/api/projects/${project.id}/files/${target.id}`, { method: 'DELETE' });
+        setOpenFiles(f => { const n = { ...f }; delete n[target.id]; return n; });
+        setOpenTabs(t => t.filter(x => x !== target.id));
+        if (activeFile === target.id) setActiveFile(null);
+      }
+      const files = await refreshTree();
+      const parts: string[] = [];
+      if (changes?.writes.length) parts.push(`wrote ${changes.writes.length} file${changes.writes.length > 1 ? 's' : ''}`);
+      if (changes?.deletes.length) parts.push(`deleted ${changes.deletes.length}`);
+      const msg = `✔ Applied: ${parts.join(', ') || 'no file changes'}.`;
+      setChatMessages(m => [...m, { role: 'assistant', content: msg }]);
+      if (activeSessionId) saveMessageToDb(activeSessionId, 'assistant', msg);
+      if (debugAttempt) setDebugHistory(h => h.map(e => e.attempt === debugAttempt && e.status === 'testing' ? { ...e, status: 'success' } : e));
+      if (run) {
+        const target = (files || allFiles).find(f => relPath(f) === run);
+        if (target) setTimeout(() => runFile(target.id, !!debugAttempt), 100);
+      }
+    } catch (e: any) {
+      setChatMessages(m => [...m, { role: 'assistant', content: `⚠ Error applying changes: ${e.message || 'unknown error'}` }]);
     }
   };
 
   const rejectAIAction = () => {
+    if (pendingAIAction?.debugAttempt) setDebugHistory(h => h.map(e => e.attempt === pendingAIAction.debugAttempt ? { ...e, status: 'failed' } : e));
     setPendingAIAction(null);
-    setChatMessages(m => [...m, { role: 'assistant', content: '❌ User rejected changes.' }]);
+    setReviewFile(null);
+    disposeReviewModels();
+    setChatMessages(m => [...m, { role: 'assistant', content: '❌ Changes rejected.' }]);
   };
 
   const loadChatSessions = useCallback(async () => {
     if (!project) return;
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/chats`, { headers: authHeader() });
+      const res = await apiFetch(`/api/projects/${project.id}/chats`, { headers: authHeader() });
       if (res.ok) {
         const data = await res.json();
         setChatSessions(data.sessions);
@@ -1180,11 +1070,11 @@ export default function IDE() {
   const loadChatMessages = useCallback(async (sessionId: string) => {
     if (!sessionId) return;
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${sessionId}/messages`, { headers: authHeader() });
+      const res = await apiFetch(`/api/chats/${sessionId}/messages`, { headers: authHeader() });
       if (res.ok) {
         const data = await res.json();
         const msgs = data.messages.map((m: any) => ({ role: m.role, content: m.content }));
-        setChatMessages(msgs.length ? msgs : [{ role: 'assistant', content: "I'm your AI coding agent.\n\nTry:\n• \"create a REST API with auth\"\n• \"fix the errors in this file\"\n• \"run this file\"\n• \"explain this code\"\n\nI can create entire multi-file projects in one shot." }]);
+        setChatMessages(msgs.length ? msgs : [{ role: 'assistant', content: WELCOME_MESSAGE }]);
       }
     } catch (e) { console.error('Failed to load messages', e); }
   }, []);
@@ -1192,7 +1082,7 @@ export default function IDE() {
   const createNewChat = async () => {
     if (!project) return;
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/chats`, {
+      const res = await apiFetch(`/api/projects/${project.id}/chats`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name: 'New Chat' })
@@ -1201,7 +1091,7 @@ export default function IDE() {
         const data = await res.json();
         setChatSessions(prev => [data.session, ...prev]);
         setActiveSessionId(data.session.id);
-        setChatMessages([{ role: 'assistant', content: "I'm your AI coding agent.\n\nTry:\n• \"create a REST API with auth\"\n• \"fix the errors in this file\"\n• \"run this file\"\n• \"explain this code\"\n\nI can create entire multi-file projects in one shot." }]);
+        setChatMessages([{ role: 'assistant', content: WELCOME_MESSAGE }]);
       }
     } catch (e) { console.error(e); }
   };
@@ -1209,12 +1099,12 @@ export default function IDE() {
   const deleteChat = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${id}`, { method: 'DELETE', headers: authHeader() });
+      const res = await apiFetch(`/api/chats/${id}`, { method: 'DELETE', headers: authHeader() });
       if (res.ok) {
         setChatSessions(prev => prev.filter(s => s.id !== id));
         if (activeSessionId === id) {
           setActiveSessionId(null);
-          setChatMessages([{ role: 'assistant', content: "I'm your AI coding agent.\n\nTry:\n• \"create a REST API with auth\"\n• \"fix the errors in this file\"\n• \"run this file\"\n• \"explain this code\"\n\nI can create entire multi-file projects in one shot." }]);
+          setChatMessages([{ role: 'assistant', content: WELCOME_MESSAGE }]);
         }
       }
     } catch (err) { console.error(err); }
@@ -1222,7 +1112,7 @@ export default function IDE() {
 
   const renameChat = async (id: string, newName: string) => {
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${id}`, {
+      const res = await apiFetch(`/api/chats/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name: newName })
@@ -1248,23 +1138,25 @@ export default function IDE() {
 
   const saveMessageToDb = async (sessionId: string, role: string, content: string) => {
     try {
-      await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chats/${sessionId}/messages`, {
+      await apiFetch(`/api/chats/${sessionId}/messages`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ role, content })
       });
     } catch (e) { }
   };
 
-  const sendChatMessage = async () => {
-    if (!chatInput.trim() || chatLoading) return;
+  // Send a message to Claude. Text streams in; proposed file changes arrive at the end for review.
+  const sendChatMessage = async (overrideText?: string, selection?: string) => {
+    const userText = (overrideText ?? chatInput).trim();
+    if (!userText || chatLoading || !project) return;
+    setShowAIPanel(true);
+    setAiTab('chat');
 
-    // Auto-create session if none exists
     let currentSessionId = activeSessionId;
-    if (!currentSessionId && project) {
+    if (!currentSessionId) {
       try {
-        const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/chats`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-          body: JSON.stringify({ name: chatInput.slice(0, 30) + (chatInput.length > 30 ? '...' : '') })
+        const res = await apiFetch(`/api/projects/${project.id}/chats`, {
+          method: 'POST', body: JSON.stringify({ name: userText.slice(0, 40) + (userText.length > 40 ? '…' : '') })
         });
         if (res.ok) {
           const data = await res.json();
@@ -1272,81 +1164,109 @@ export default function IDE() {
           setActiveSessionId(currentSessionId);
           setChatSessions(prev => [data.session, ...prev]);
         }
-      } catch (e) { }
+      } catch { /* chat still works without history */ }
     }
+    const shown = selection ? `${userText}\n\n\`\`\`\n${selection.slice(0, 2000)}${selection.length > 2000 ? '\n…' : ''}\n\`\`\`` : userText;
+    if (currentSessionId) saveMessageToDb(currentSessionId, 'user', shown);
 
-    const userText = chatInput;
-    if (currentSessionId) saveMessageToDb(currentSessionId, 'user', userText);
+    const history = [...chatMessages.filter(m => m.content !== WELCOME_MESSAGE), { role: 'user' as const, content: userText }];
+    setChatMessages(m => [...m, { role: 'user', content: shown }, { role: 'assistant', content: '' }]);
+    if (overrideText === undefined) setChatInput('');
+    setChatLoading(true);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
-    const nextMessages = [...chatMessages, { role: 'user', content: userText }];
-    setChatMessages(nextMessages as any); setChatInput(''); setChatLoading(true);
+    const setLastAssistant = (fn: (prev: string) => string) => setChatMessages(m => {
+      const next = [...m];
+      next[next.length - 1] = { role: 'assistant', content: fn(next[next.length - 1].content) };
+      return next;
+    });
 
-    abortControllerRef.current = new AbortController();
-
-    const fileTree = allFiles.map(f => ({ name: f.name, path: f.path, isFolder: f.isFolder }));
-    const activeFileData = activeFile ? openFiles[activeFile] : null;
+    const activeData = activeFile && activeFile !== '__preview__' ? openFiles[activeFile] : null;
+    let finalReply = '';
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        signal: abortControllerRef.current.signal,
+      const res = await apiFetch(`/api/ai/chat`, {
+        method: 'POST',
+        signal: controller.signal,
         body: JSON.stringify({
-          messages: nextMessages,
-          fileTree,
-          activeFile: activeFileData ? { name: activeFileData.name, path: activeFileData.path, content: activeFileData.value } : null,
-          model: selectedModel
+          projectId: project.id,
+          messages: history,
+          activeFile: activeData ? { path: relPath(activeData), content: activeData.value } : null,
+          selection: selection || null,
+          model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (data.action === 'scaffold' && data.items?.length) {
-        setPendingAIAction({ action: 'scaffold', data, summary: data.reply });
-      } else if (data.action === 'apply' && data.code && data.fileName) {
-        const target = allFiles.find(f => f.name === data.fileName && !f.isFolder);
-        if (target) {
-          const originalCode = openFiles[target.id]?.value || '';
-          setPendingAIAction({ action: 'apply', data, summary: data.reply, originalCode });
-        } else {
-          setChatMessages(m => [...m, { role: 'assistant', content: data.reply || 'Could not find target file.' }]);
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const line = frame.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === 'text') setLastAssistant(prev => prev + evt.text);
+          else if (evt.type === 'error') throw new Error(evt.error);
+          else if (evt.type === 'done') {
+            finalReply = evt.reply;
+            setLastAssistant(() => evt.reply);
+            if (evt.changes) {
+              setPendingAIAction({ changes: evt.changes, run: evt.run, summary: evt.reply });
+              setReviewFile(evt.changes.writes[0]?.path || null);
+            } else if (evt.run) {
+              const target = allFiles.find(f => relPath(f) === evt.run);
+              if (target) { openFile(target); setTimeout(() => runFile(target.id), 100); }
+            }
+          }
         }
-      } else if (data.action === 'delete' && data.items?.length) {
-        setPendingAIAction({ action: 'delete', data, summary: data.reply });
-      } else if (data.action === 'run' && data.fileName) {
-        const target = allFiles.find(f => f.name === data.fileName);
-        setChatMessages(m => [...m, { role: 'assistant', content: `Running ${data.fileName} — check Terminal tab.` }]);
-        if (target) { openFile(target); setTimeout(() => runFile(target.id), 100); }
-      } else {
-        const aiMsg = data.reply || data.error || 'No response.';
-        setChatMessages(m => [...m, { role: 'assistant', content: aiMsg }]);
-        if (currentSessionId) saveMessageToDb(currentSessionId, 'assistant', aiMsg);
       }
+      if (currentSessionId && finalReply) saveMessageToDb(currentSessionId, 'assistant', finalReply);
     } catch (e: any) {
-      if (e.name === 'AbortError') {
-        setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Generation stopped by user.' }]);
-        if (currentSessionId) saveMessageToDb(currentSessionId, 'assistant', '⚠ Generation stopped by user.');
-      } else {
-        setChatMessages(m => [...m, { role: 'assistant', content: '⚠ Could not reach the AI backend.' }]);
-      }
-    } finally { setChatLoading(false); abortControllerRef.current = null; }
+      const msg = e.name === 'AbortError' ? '⚠ Generation stopped.' : `⚠ ${e.message || 'Could not reach the AI backend.'}`;
+      setLastAssistant(prev => (prev ? `${prev}\n\n${msg}` : msg));
+      if (currentSessionId) saveMessageToDb(currentSessionId, 'assistant', msg);
+    } finally {
+      setChatLoading(false);
+      abortControllerRef.current = null;
+    }
   };
 
-  const createItem = async (isFolder) => {
-    const name = newItemName.trim();
-    if (!name || !project) return;
+  // Accepts "name.js", or a path like "src/utils/name.js" (missing folders are created).
+  sendChatRef.current = sendChatMessage;
+  aiCompleteRef.current = aiEnabled && !!extensionStates.aiAssistant;
+
+  const createItem = async (isFolder: boolean) => {
+    const raw = newItemName.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!raw || !project) return;
+    const full = newItemParent ? `${newItemParent}/${raw}` : raw;
+    const i = full.lastIndexOf('/');
+    const name = i === -1 ? full : full.slice(i + 1);
+    const path = i === -1 ? '' : full.slice(0, i);
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-        body: JSON.stringify({ name, path: '', isFolder, language: getLang(name) }),
+      const res = await apiFetch(`/api/projects/${project.id}/files`, {
+        method: 'POST', body: JSON.stringify({ name, path, isFolder, language: getLang(name) }),
       });
       const data = await res.json();
       if (!res.ok) { alert(data.error); return; }
-      setNewItemName(''); setShowNewItem(null);
+      setNewItemName(''); setShowNewItem(null); setNewItemParent('');
+      if (path) setExpanded(prev => { const n = new Set(prev); path.split('/').forEach((_, k, a) => n.add(a.slice(0, k + 1).join('/'))); return n; });
       await refreshTree();
       if (!isFolder) openFile(data.file);
-    } catch { }
+    } catch { /* network error */ }
   };
 
   const deleteItem = async (id, name, isFolder) => {
     if (!window.confirm(`Delete ${isFolder ? 'folder' : 'file'} "${name}"${isFolder ? ' and everything inside?' : '?'}`)) return;
-    await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${id}`, { method: 'DELETE', headers: authHeader() });
+    await apiFetch(`/api/projects/${project.id}/files/${id}`, { method: 'DELETE', headers: authHeader() });
     await refreshTree();
     if (!isFolder) {
       setOpenFiles(f => { const n = { ...f }; delete n[id]; return n; });
@@ -1359,15 +1279,20 @@ export default function IDE() {
   const handleReplaceAll = async () => {
     if (!project || !searchQuery) return;
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/replace`, {
+      if (!window.confirm(`Replace every "${searchQuery}" with "${replaceQuery}" in all project files?`)) return;
+      const res = await apiFetch(`/api/projects/${project.id}/replace`, {
         method: 'POST',
-        headers: authHeader(),
         body: JSON.stringify({ q: searchQuery, replaceWith: replaceQuery })
       });
       const data = await res.json();
       if (data.success) {
-        alert(`Replaced ${data.count} files.`);
-        loadProject(project.id);
+        const files = await refreshTree();
+        setOpenFiles(prev => {
+          const next = { ...prev };
+          for (const id of Object.keys(prev)) { const f = files?.find(x => x.id === id); if (f) { next[id] = { ...prev[id], value: f.content }; syncModel(id, f.content); } }
+          return next;
+        });
+        alert(`Replaced in ${data.count} file${data.count === 1 ? '' : 's'}.`);
       }
     } catch (e) {
       console.error(e);
@@ -1379,7 +1304,7 @@ export default function IDE() {
     const newName = renameValue.trim();
     setRenamingFile(null);
     if (!newName) return;
-    const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/files/${id}`, {
+    const res = await apiFetch(`/api/projects/${project.id}/files/${id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader() },
       body: JSON.stringify({ name: newName }),
     });
@@ -1393,14 +1318,26 @@ export default function IDE() {
     setExpanded(prev => { const next = new Set(prev); next.has(path) ? next.delete(path) : next.add(path); return next; });
   };
 
+  const cloneRepo = async () => {
+    const url = window.prompt('Public git repository URL (https://...)', 'https://github.com/');
+    if (!url || url === 'https://github.com/') return;
+    const res = await apiFetch('/api/projects/clone', { method: 'POST', body: JSON.stringify({ url }) });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Clone failed'); return; }
+    await fetchProjects();
+    loadProject(data.project.id);
+    setShowProjectPicker(false);
+  };
+
   const createProject = async () => {
     const name = newProjectName.trim();
     if (!name) return;
-    const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects`, {
+    const res = await apiFetch(`/api/projects`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, template: newProjectTemplate }),
     });
     const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Could not create project'); return; }
     setNewProjectName('');
     await fetchProjects();
     loadProject(data.project.id);
@@ -1411,13 +1348,13 @@ export default function IDE() {
     if (!project) return;
     setDeployState('deploying');
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/deploy`, {
+      const res = await apiFetch(`/api/projects/${project.id}/deploy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() }
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Deploy failed');
-      setDeployUrl(data.url);
+      setDeployUrl(backendUrl(data.path));
       setDeployContainerId(data.containerId);
       setDeployState('deployed');
     } catch (e: any) {
@@ -1429,7 +1366,7 @@ export default function IDE() {
   const handleStopDeploy = async () => {
     if (!project || !deployContainerId) return;
     try {
-      await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${project.id}/stop-deploy`, {
+      await apiFetch(`/api/projects/${project.id}/stop-deploy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ containerId: deployContainerId })
@@ -1447,7 +1384,7 @@ export default function IDE() {
     e.stopPropagation();
     if (!window.confirm("Are you sure you want to delete this project? This cannot be undone.")) return;
     try {
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${id}`, {
+      const res = await apiFetch(`/api/projects/${id}`, {
         method: 'DELETE',
         headers: authHeader()
       });
@@ -1472,7 +1409,7 @@ export default function IDE() {
       const name = dirHandle.name;
 
       // Create project
-      const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects`, {
+      const res = await apiFetch(`/api/projects`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ name }),
       });
@@ -1493,7 +1430,7 @@ export default function IDE() {
 
       // Upload files (one by one for simplicity)
       for (const f of newFiles) {
-        await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/projects/${projectId}/files`, {
+        await apiFetch(`/api/projects/${projectId}/files`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
           body: JSON.stringify(f)
         });
@@ -1521,6 +1458,9 @@ export default function IDE() {
     { id: 'new-file', label: '+ New File', action: () => { setActivityPanel('explorer'); setShowNewItem('file'); } },
     { id: 'new-folder', label: '+ New Folder', action: () => { setActivityPanel('explorer'); setShowNewItem('folder'); } },
     { id: 'new-project', label: '+ New Project', action: () => setShowProjectPicker(true) },
+    { id: 'clone', label: 'Git: Clone Repository into New Project', action: cloneRepo },
+    { id: 'download', label: 'Download Project (.tar.gz)', action: downloadProject },
+    { id: 'sync', label: 'Sync Files Changed in Terminal', action: importFromWorkspace },
     { id: 'toggle-minimap', label: `${minimapEnabled ? 'Hide' : 'Show'} Minimap`, action: () => setMinimapEnabled(v => !v) },
     { id: 'toggle-wrap', label: `${wordWrap ? 'Disable' : 'Enable'} Word Wrap`, action: () => setWordWrap(v => !v) },
     { id: 'font-increase', label: 'Increase Font Size', action: () => setFontSize(f => Math.min(f + 1, 24)) },
@@ -1590,16 +1530,28 @@ export default function IDE() {
           ) : (
             <>
               <a href={deployUrl} target="_blank" rel="noreferrer" className="run-btn" style={{ textDecoration: 'none', background: 'var(--vscode-accent)' }}>
-                <ExternalLink size={12} /> {deployUrl}
+                <ExternalLink size={12} /> Open deployment
               </a>
               <button className="run-btn" style={{ background: 'var(--vscode-error)', marginLeft: 8 }} onClick={handleStopDeploy}>
                 <Square size={12} /> Stop Deploy
               </button>
             </>
           )}
-          <button className="logout-btn" onClick={handleLogout}><LogOut size={16} /></button>
+          <button className="logout-btn" onClick={handleLogout} title="Log out"><LogOut size={16} /></button>
         </div>
       </header>
+
+      {backendIssue && !bannerDismissed && (
+        <div className={`backend-banner ${backendIssue === 'ai' ? 'warn' : 'error'}`}>
+          <span>
+            {backendIssue === 'unreachable' && <>Can't reach the backend at <code>{backendUrl('')}</code>. Is it running? (<code>cd backend && npm start</code>)</>}
+            {backendIssue === 'outdated' && <>The backend is running an <b>old version</b>. Stop it (Ctrl+C) and start it again with <code>npm start</code> in <code>backend/</code> — the terminal and AI won't work until then.</>}
+            {backendIssue === 'db' && <>The backend can't reach its database. Check <code>DATABASE_URL</code> and run <code>npm run doctor</code> in <code>backend/</code>.</>}
+            {backendIssue === 'ai' && <>AI is off: add <code>ANTHROPIC_API_KEY=sk-ant-…</code> to <code>backend/.env</code> and restart the backend.</>}
+          </span>
+          <button className="icon-btn" onClick={() => setBannerDismissed(true)} title="Dismiss"><X size={14} /></button>
+        </div>
+      )}
 
       {showProjectPicker && (
         <div className="project-picker">
@@ -1611,9 +1563,17 @@ export default function IDE() {
             </div>
           ))}
           <div className="project-new-row">
-            <input className="new-file-input" placeholder="New project name..." value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createProject()} />
-            <button className="icon-btn" onClick={createProject}>+</button>
+            <input className="new-file-input" autoFocus placeholder="New project name..." value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createProject()} />
+            <button className="icon-btn" onClick={createProject} title="Create project">+</button>
           </div>
+          {templates.length > 0 && (
+            <div className="project-template-row">
+              <span>Start from</span>
+              <select className="font-select" value={newProjectTemplate} onChange={e => setNewProjectTemplate(e.target.value)}>
+                {templates.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </select>
+            </div>
+          )}
         </div>
       )}
 
@@ -1647,9 +1607,10 @@ export default function IDE() {
                 <div className="sidebar-header">
                   <span className="sidebar-title-text">EXPLORER</span>
                   <div style={{ display: 'flex', gap: 2 }}>
-                    <button className="icon-btn" onClick={() => setShowNewItem(showNewItem === 'file' ? null : 'file')} title="New File (Ctrl+N)"><Plus size={14} /></button>
-                    <button className="icon-btn" onClick={() => setShowNewItem(showNewItem === 'folder' ? null : 'folder')} title="New Folder"><FolderPlus size={14} /></button>
-                    <button className="icon-btn" title="Refresh Explorer" onClick={refreshTree}><RefreshCw size={14} /></button>
+                    <button className="icon-btn" onClick={() => { setNewItemParent(''); setShowNewItem(showNewItem === 'file' ? null : 'file'); }} title="New File (Ctrl+N) — use folder/name.js for nested files"><Plus size={14} /></button>
+                    <button className="icon-btn" onClick={() => { setNewItemParent(''); setShowNewItem(showNewItem === 'folder' ? null : 'folder'); }} title="New Folder"><FolderPlus size={14} /></button>
+                    <button className="icon-btn" title="Sync files changed in the terminal" onClick={importFromWorkspace}><RefreshCw size={14} /></button>
+                    <button className="icon-btn" title="Download project (.tar.gz)" onClick={downloadProject}><Download size={14} /></button>
                     <button className="icon-btn" title="Collapse All Folders" onClick={() => { setExpanded(new Set()); setIsRootExpanded(false); }}><Minus size={14} /></button>
                   </div>
                 </div>
@@ -1658,7 +1619,7 @@ export default function IDE() {
                     <input className="new-file-input" autoFocus value={newItemName}
                       onChange={e => setNewItemName(e.target.value)}
                       onKeyDown={e => { if (e.key === 'Enter') createItem(showNewItem === 'folder'); if (e.key === 'Escape') setShowNewItem(null); }}
-                      placeholder={showNewItem === 'folder' ? 'folder-name' : 'filename.js'} />
+                      placeholder={`${newItemParent ? newItemParent + '/' : ''}${showNewItem === 'folder' ? 'folder-name' : 'filename.js or dir/file.js'}`} />
                     <button className="icon-btn" onClick={() => createItem(showNewItem === 'folder')}>✓</button>
                   </div>
                 )}
@@ -1672,7 +1633,8 @@ export default function IDE() {
                     <TreeNode node={tree} depth={0} openFile={openFile} activeFile={activeFile}
                       expanded={expanded} toggleExpand={toggleExpand} startRename={startRename} deleteItem={deleteItem}
                       renamingFile={renamingFile} renameValue={renameValue} setRenameValue={setRenameValue}
-                      submitRename={submitRename} renameInputRef={renameInputRef} />
+                      submitRename={submitRename} renameInputRef={renameInputRef}
+                      newItemIn={(folder) => { setNewItemParent(folder); setShowNewItem('file'); setExpanded(prev => new Set(prev).add(folder)); }} />
                   )}
                 </div>
               </>
@@ -1705,10 +1667,19 @@ export default function IDE() {
                   <button className="icon-btn compact" title="Refresh Git" onClick={refreshGit}>↻</button>
                 </div>
                 <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  <div className="settings-label">Git status</div>
-                  {gitStatus ? (
-                    <div style={{ padding: 12, background: '#141620', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8 }}>
-                      <pre style={{ color: 'var(--vscode-text)', fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{gitStatus}</pre>
+                  <div className="settings-label">Changes {gitStatus.branch && <span style={{ textTransform: 'none', opacity: 0.7 }}>· <GitBranch size={10} /> {gitStatus.branch}</span>}</div>
+                  {gitStatus.files.length ? (
+                    <div className="git-changes">
+                      {gitStatus.files.map(f => (
+                        <div key={f.path} className="git-change-row" title="Show diff" onClick={async () => {
+                          const res = await apiFetch(`/api/projects/${project!.id}/git/diff?path=${encodeURIComponent(f.path)}`);
+                          const data = await res.json();
+                          setGitDiff({ path: f.path, diff: data.diff || '(new file — no previous version)' });
+                        }}>
+                          <span className={`git-status-badge s-${f.status.replace('?', 'U')}`}>{f.status === '??' ? 'U' : f.status}</span>
+                          <span className="git-change-path">{f.path}</span>
+                        </div>
+                      ))}
                     </div>
                   ) : (
                     <div className="no-results" style={{ padding: 12, background: '#141620', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8 }}>
@@ -1913,7 +1884,7 @@ export default function IDE() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <button className="welcome-link" onClick={() => setShowProjectPicker(true)}><Plus size={16} /> New Project...</button>
                       <button className="welcome-link" onClick={openLocalFolder}><FolderOpen size={16} /> Open Folder...</button>
-                      <button className="welcome-link" onClick={() => window.open('https://github.com/new', '_blank')}><GitBranch size={16} /> Clone Git Repository...</button>
+                      <button className="welcome-link" onClick={cloneRepo}><GitBranch size={16} /> Clone Git Repository...</button>
                     </div>
 
                     <h2 style={{ fontSize: 13, textTransform: 'uppercase', color: '#ccc', marginTop: 32, marginBottom: 16 }}>Recent</h2>
@@ -1975,29 +1946,25 @@ export default function IDE() {
                           <span style={{ color: '#333', fontSize: 12, fontWeight: 600 }}>Browser Preview</span>
                           <select
                             style={{ fontSize: 11, padding: '2px 4px', border: '1px solid #ccc', borderRadius: 4, flex: 1 }}
-                            onChange={(e) => {
-                              const iframe = document.getElementById('preview-iframe') as HTMLIFrameElement;
-                              if (iframe) iframe.src = e.target.value;
-                            }}
+                            value={previewSrc}
+                            onChange={(e) => setPreviewSrc(e.target.value)}
                           >
-                            {Object.entries(previewPorts).map(([internal, mapped]) => (
-                              <option key={internal} value={`http://localhost:${mapped}`} selected={internal === '8080/tcp'}>Port {internal} (→ {mapped})</option>
+                            {Object.entries(previewPorts).map(([port, url]) => (
+                              <option key={port} value={url}>{port === 'terminal' ? 'Terminal app' : `Port ${port}`}</option>
                             ))}
                           </select>
-                          <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#555' }} onClick={() => {
-                            const iframe = document.getElementById('preview-iframe') as HTMLIFrameElement;
-                            if (iframe) iframe.src = iframe.src;
-                          }}>↻</button>
+                          <button title="Reload" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#555' }} onClick={() => setPreviewNonce(n => n + 1)}>↻</button>
+                          <a title="Open in new tab" href={previewSrc} target="_blank" rel="noreferrer" style={{ color: '#555', textDecoration: 'none' }}>↗</a>
                         </div>
-                        <iframe
-                          id="preview-iframe"
-                          src={`http://localhost:${previewPorts['8080/tcp'] || previewPorts['3000/tcp'] || Object.values(previewPorts)[0]}`}
-                          style={{ flex: 1, width: '100%', border: 'none', background: '#fff' }}
-                        />
+                        {previewSrc ? (
+                          <iframe key={previewNonce} title="App preview" src={previewSrc} style={{ flex: 1, width: '100%', border: 'none', background: '#fff' }} />
+                        ) : (
+                          <div style={{ padding: 24, color: '#666' }}>Nothing to preview yet. Run an app that listens on a port.</div>
+                        )}
                       </div>
                     ) : activeFileData ? (
                       <Editor height="calc(100% - 10px)" language={activeLang} theme="vs-dark"
-                        path={activeFile} value={activeFileData.value || ''}
+                        path={activeFile} defaultValue={activeFileData.value || ''}
                         onChange={updateActiveFileContent}
                         onMount={(editor, monaco) => {
                           editorRef.current = editor;
@@ -2006,37 +1973,60 @@ export default function IDE() {
 
                           if (!(window as any).__monacoAutocompleteRegistered) {
                             (window as any).__monacoAutocompleteRegistered = true;
+                            // Registered once per page, so it reads live settings through refs.
                             monaco.languages.registerInlineCompletionsProvider('*', {
-                              provideInlineCompletions: async (model, position, context, token) => {
-                                const line = position.lineNumber;
-                                const col = position.column;
-                                const text = model.getValue();
+                              provideInlineCompletions: async (model, position, _context, token) => {
+                                if (!aiCompleteRef.current) return { items: [] };
+                                // Debounce: only ask once typing pauses.
+                                await new Promise(r => setTimeout(r, 450));
+                                if (token.isCancellationRequested) return { items: [] };
                                 const offset = model.getOffsetAt(position);
+                                const text = model.getValue();
                                 const prefix = text.substring(0, offset);
-                                const suffix = text.substring(offset);
-
+                                if (!prefix.trim()) return { items: [] };
+                                const controller = new AbortController();
+                                token.onCancellationRequested(() => controller.abort());
                                 try {
-                                  const res = await apiFetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/ai/autocomplete`, {
+                                  const res = await apiFetch(`/api/ai/autocomplete`, {
                                     method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ prefix, suffix, language: model.getLanguageId() }),
-                                    signal: token.isCancellationRequested ? undefined : (new AbortController()).signal
+                                    body: JSON.stringify({ prefix, suffix: text.substring(offset), language: model.getLanguageId() }),
+                                    signal: controller.signal,
                                   });
                                   const data = await res.json();
-                                  if (data.completion) {
-                                    return {
-                                      items: [{
-                                        insertText: data.completion,
-                                        range: new monaco.Range(line, col, line, col)
-                                      }]
-                                    };
+                                  if (data.completion && !token.isCancellationRequested) {
+                                    return { items: [{ insertText: data.completion, range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column) }] };
                                   }
-                                } catch (e) { }
+                                } catch { /* cancelled or offline */ }
                                 return { items: [] };
                               },
-                              freeInlineCompletions: (completions) => { }
-                            });
+                              freeInlineCompletions: () => { },
+                              disposeInlineCompletions: () => { },
+                            } as any);
                           }
+
+                          // Right-click / keyboard AI actions on the current selection.
+                          const selectionText = () => {
+                            const sel = editor.getSelection();
+                            const m = editor.getModel();
+                            return sel && m ? m.getValueInRange(sel) : '';
+                          };
+                          const aiAction = (id: string, label: string, prompt: string, keybinding?: number) => editor.addAction({
+                            id, label, contextMenuGroupId: '0_orbit_ai', keybindings: keybinding ? [keybinding] : undefined,
+                            run: () => {
+                              const sel = selectionText();
+                              if (prompt) sendChatRef.current?.(prompt, sel || undefined);
+                              else {
+                                setShowAIPanel(true);
+                                pendingSelectionRef.current = sel;
+                                setTimeout(() => (document.querySelector('.chat-input') as HTMLTextAreaElement | null)?.focus(), 50);
+                              }
+                            },
+                          });
+                          aiAction('orbit.ai.ask', 'Orbit AI: Ask About Selection', '', monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI);
+                          aiAction('orbit.ai.explain', 'Orbit AI: Explain Selection', 'Explain what this code does, step by step.');
+                          aiAction('orbit.ai.fix', 'Orbit AI: Find & Fix Bugs in Selection', 'Find bugs in this code and fix them in the file.');
+                          aiAction('orbit.ai.tests', 'Orbit AI: Write Tests for Selection', 'Write unit tests for this code in an appropriate new test file.');
+                          aiAction('orbit.ai.docs', 'Orbit AI: Add Documentation Comments', 'Add clear documentation comments to this code in the file. Do not change behavior.');
 
                           editor.onDidChangeModelDecorations(() => {
                             const model = editor.getModel();
@@ -2064,34 +2054,25 @@ export default function IDE() {
                     <span className={`bottom-tab ${bottomTab === 'problems' ? 'active' : ''}`} onClick={() => setBottomTab('problems')}>
                       PROBLEMS {(errorCount > 0 || warnCount > 0) && <span className="problem-badge" style={{ background: errorCount > 0 ? '#f44336' : '#e3b341' }}>{errorCount + warnCount}</span>}
                     </span>
-                    <span className={`bottom-tab ${bottomTab === 'output' ? 'active' : ''}`} onClick={() => setBottomTab('output')}>OUTPUT</span>
                     <span className={`bottom-tab ${bottomTab === 'chaos' ? 'active' : ''}`} onClick={() => setBottomTab('chaos')}>
                       CHAOS {chaosResults && <span className="problem-badge" style={{ background: chaosResults.resilienceScore >= 70 ? '#2ea043' : '#e3b341' }}>{chaosResults.resilienceScore}%</span>}
                     </span>
                   </div>
-                  <div className="terminal-panel" style={{ display: bottomTab === 'terminal' ? 'flex' : 'none' }}>
-                    <div className="terminal-command-row">
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        <button className="icon-btn" title="New Terminal" onClick={newTerminal}>New</button>
-                        <button className="icon-btn" title="Split Terminal" onClick={splitTerminal}>{isSplit ? 'Unsplit' : 'Split'}</button>
-                        <button className="icon-btn" title="Kill Terminal" onClick={killTerminal}>Kill</button>
-                        <button className="icon-btn" title="Clear Terminal" onClick={clearTerminal}>Clear</button>
-                        <button className="icon-btn" title="Switch shell" onClick={toggleTerminalMode}>Mode: {terminalMode}</button>
-                      </div>
-                      <input
-                        className="terminal-command-input"
-                        value={terminalCommand}
-                        onChange={e => setTerminalCommand(e.target.value)}
-                        onKeyDown={handleTerminalCommandKeyDown}
-                        placeholder="Run commands: help, run, open app.js, search foo, toggle minimap"
-                      />
-                      <button className="icon-btn" title="Execute command" onClick={executeTerminalCommand}>Run</button>
-                    </div>
-                    <div className="terminal-split" style={{ display: 'flex', gap: 8, flex: 1, minHeight: 0, overflow: 'hidden' }}>
-                      <div ref={terminalRef} className="terminal-host" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }} />
-                      {isSplit && <div ref={splitRef} className="terminal-host" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }} />}
-                    </div>
-                  </div>
+                  {socket && project && (
+                    <TerminalPanel
+                      key={project.id}
+                      ref={terminalPanelRef}
+                      socket={socket}
+                      projectId={project.id}
+                      fontFamily={codeFont}
+                      visible={bottomTab === 'terminal'}
+                      onOpenPreview={(url) => {
+                        setPreviewPorts(prev => ({ ...prev, terminal: url }));
+                        setOpenTabs(t => t.includes('__preview__') ? t : [...t, '__preview__']);
+                        setActiveFile('__preview__');
+                      }}
+                    />
+                  )}
                   {bottomTab === 'problems' && (
                     <div className="problems-host">
                       {!problems.length && <div style={{ color: 'var(--vscode-text-dim)' }}>✓ No problems detected.</div>}
@@ -2104,7 +2085,6 @@ export default function IDE() {
                       ))}
                     </div>
                   )}
-                  {bottomTab === 'output' && <div className="problems-host">{runOutput || 'No output yet.'}</div>}
                   {bottomTab === 'chaos' && (
                     <div className="problems-host">
                       {isChaosRunning && <div style={{ color: 'var(--vscode-text-dim)' }}>⏳ Running chaos scenarios in parallel...</div>}
@@ -2186,6 +2166,11 @@ export default function IDE() {
 
                   {aiTab === 'history' ? (
                     <div className="debug-history-panel">
+                      {runFailure && (
+                        <button className="run-btn" style={{ margin: 8 }} onClick={() => { const f = runFailure; setRunFailure(null); autoDebugAttempts.current = 0; autoDebug(f); }}>
+                          <Bug size={12} /> Fix the last failed run with AI
+                        </button>
+                      )}
                       {debugHistory.length === 0 ? (
                         <div className="debug-history-empty">No auto-debug cycles yet.</div>
                       ) : (
@@ -2245,29 +2230,43 @@ export default function IDE() {
                       </div>
                       {pendingAIAction && (
                         <div className="ai-review-panel">
-                          <h4>Review Pending Action</h4>
-                          <p><strong>Summary:</strong> {pendingAIAction.summary}</p>
+                          <h4>Review proposed changes</h4>
                           <div className="ai-review-content">
-                            {pendingAIAction.action === 'scaffold' && (
-                              <ul>{pendingAIAction.data.items.map((f: any, i: number) => <li key={i}>{f.path ? f.path + '/' : ''}{f.name}</li>)}</ul>
-                            )}
-                            {pendingAIAction.action === 'delete' && (
-                              <ul>{pendingAIAction.data.items.map((f: string, i: number) => <li key={i}>{f}</li>)}</ul>
-                            )}
-                            {pendingAIAction.action === 'apply' && (
-                              <div style={{ height: '200px' }}>
+                            <ul className="ai-review-files">
+                              {pendingAIAction.changes?.writes.map(w => {
+                                const exists = allFiles.some(f => relPath(f) === w.path);
+                                return (
+                                  <li key={w.path} className={reviewFile === w.path ? 'active' : ''} onClick={() => setReviewFile(w.path)}>
+                                    <span className={`review-badge ${exists ? 'mod' : 'new'}`}>{exists ? 'M' : 'A'}</span> {w.path}
+                                  </li>
+                                );
+                              })}
+                              {pendingAIAction.changes?.deletes.map(d => (
+                                <li key={d}><span className="review-badge del">D</span> {d}</li>
+                              ))}
+                              {pendingAIAction.run && <li><span className="review-badge run">▶</span> then run {pendingAIAction.run}</li>}
+                            </ul>
+                            {reviewFile && pendingAIAction.changes?.writes.some(w => w.path === reviewFile) && (
+                              <div style={{ height: 220 }}>
                                 <DiffEditor
-                                  original={pendingAIAction.originalCode}
-                                  modified={pendingAIAction.data.code}
-                                  language={getLang(pendingAIAction.data.fileName)}
-                                  options={{ readOnly: true, minimap: { enabled: false } }}
+                                  original={(() => { const f = allFiles.find(x => relPath(x) === reviewFile); return f ? (openFiles[f.id]?.value ?? f.content) : ''; })()}
+                                  modified={pendingAIAction.changes.writes.find(w => w.path === reviewFile)?.content || ''}
+                                  language={getLang(reviewFile)}
+                                  // Keeping the models avoids Monaco's "TextModel got disposed before DiffEditorWidget
+                                  // model got reset" error on unmount; unique paths keep reviews from sharing stale models.
+                                  keepCurrentOriginalModel
+                                  keepCurrentModifiedModel
+                                  originalModelPath={`review-${reviewSeq}-a/${reviewFile}`}
+                                  modifiedModelPath={`review-${reviewSeq}-b/${reviewFile}`}
+                                  theme="vs-dark"
+                                  options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: false, fontSize: 12 }}
                                 />
                               </div>
                             )}
                           </div>
                           <div className="ai-review-actions">
-                            <button onClick={rejectAIAction} style={{ background: '#e74c3c', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>Reject</button>
-                            <button onClick={approveAIAction} style={{ background: '#2ecc71', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', marginLeft: '8px' }}>Approve</button>
+                            <button onClick={rejectAIAction} className="review-btn reject">Reject</button>
+                            <button onClick={approveAIAction} className="review-btn approve">Approve{pendingAIAction.run ? ' & run' : ''}</button>
                           </div>
                         </div>
                       )}
@@ -2296,27 +2295,26 @@ export default function IDE() {
                               if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
                                 if (chatInput.trim()) {
-                                  sendChatMessage();
+                                  const sel = pendingSelectionRef.current;
+                                  pendingSelectionRef.current = '';
+                                  sendChatMessage(undefined, sel || undefined);
                                   e.currentTarget.style.height = 'auto';
                                 }
                               }
                             }}
                             rows={1}
                             style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'inherit', resize: 'none', padding: '0', fontSize: '13px', alignSelf: 'center', maxHeight: '150px' }}
-                            placeholder="Ask the AI..." />
+                            placeholder={aiEnabled ? 'Ask Orbit to build, fix or explain… (Enter to send)' : 'AI is not configured on the server (ANTHROPIC_API_KEY)'} />
 
                           <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                             <button className="icon-btn" onClick={() => setShowModelMenu(!showModelMenu)} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', background: 'var(--vscode-bg)', padding: '4px 10px', borderRadius: '16px', color: 'var(--vscode-text-dim)' }}>
-                              <span>{selectedModel.includes('pro') ? 'Pro' : selectedModel.includes('qwen') ? 'Ollama' : 'Flash'}</span>
+                              <span>{(aiModels.find(m => m.id === selectedModel)?.label || selectedModel).replace(/^Claude /, '')}</span>
                               <ChevronDown size={12} />
                             </button>
 
                             {showModelMenu && (
                               <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', right: 0, background: '#1e1e24', border: '1px solid #333', borderRadius: '12px', padding: '8px 0', width: '220px', zIndex: 1000, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column' }}>
-                                {[
-                                  { id: 'gemini-flash-lite-latest', title: 'Gemini', sub: 'Fastest answers' },
-                                  { id: 'qwen2.5-coder:7b', title: 'Ollama (Qwen)', sub: 'Local processing' }
-                                ].map(m => (
+                                {aiModels.map(m => ({ ...m, title: m.label })).map(m => (
                                   <div key={m.id} onClick={() => { setSelectedModel(m.id); setShowModelMenu(false); }} style={{ padding: '8px 16px', cursor: 'pointer', background: selectedModel === m.id ? 'rgba(255,255,255,0.05)' : 'transparent', display: 'flex', alignItems: 'center' }}>
                                     <div style={{ width: '20px' }}>{selectedModel === m.id && <Check size={12} color="var(--vscode-accent)" />}</div>
                                     <div>
@@ -2329,7 +2327,7 @@ export default function IDE() {
                             )}
                           </div>
 
-                          <button className="icon-btn" onClick={sendChatMessage} disabled={chatLoading || !chatInput.trim()} style={{ color: (chatInput.trim() && !chatLoading) ? 'var(--vscode-accent)' : 'inherit' }}>
+                          <button className="icon-btn" onClick={() => sendChatMessage()} disabled={chatLoading || !chatInput.trim()} style={{ color: (chatInput.trim() && !chatLoading) ? 'var(--vscode-accent)' : 'inherit' }}>
                             <Send size={16} />
                           </button>
                         </div>
@@ -2345,6 +2343,12 @@ export default function IDE() {
 
       <footer className="status-bar">
         <span className={`docker-dot ${dockerStatus}`}>🐳 {dockerStatus}</span>
+        <span title={socketConnected ? 'Live connection to the server' : 'Reconnecting to the server…'} style={{ color: socketConnected ? '#4caf50' : '#e3b341' }}>● {socketConnected ? 'connected' : 'offline'}</span>
+        {runFailure && (
+          <span className="health-badge" style={{ color: '#f48771' }} onClick={() => { const f = runFailure; setRunFailure(null); autoDebugAttempts.current = 0; autoDebug(f); }} title="Ask Claude to fix the failed run">
+            ✖ Run failed — Fix with AI
+          </span>
+        )}
         <span className="health-badge" title="Project insights" onClick={openInsights}>
           📊 {projectInsights.fileCount} files · {projectInsights.todoCount} TODOs
         </span>
@@ -2365,8 +2369,21 @@ export default function IDE() {
         <button className="status-btn" onClick={() => setShowAIPanel(!showAIPanel)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: showAIPanel ? 'var(--vscode-accent)' : 'transparent', color: showAIPanel ? '#fff' : 'inherit' }}>
           <MessageSquare size={12} /> {showAIPanel ? 'Hide AI' : 'Show AI'}
         </button>
-        <span className={chatLoading ? 'ai-status ai-status--thinking' : 'ai-status'}>{chatLoading ? 'AI: thinking…' : 'AI: ready'}</span>
+        <span className={chatLoading ? 'ai-status ai-status--thinking' : 'ai-status'}>{!aiEnabled ? 'AI: not configured' : chatLoading ? 'Claude: thinking…' : 'Claude: ready'}</span>
       </footer>
+
+      {gitDiff && (
+        <div className="palette-overlay" onClick={() => setGitDiff(null)}>
+          <div className="diff-box" onClick={e => e.stopPropagation()}>
+            <div className="diff-box-header"><span>{gitDiff.path}</span><button className="icon-btn" onClick={() => setGitDiff(null)}><X size={14} /></button></div>
+            <pre className="diff-box-body">
+              {gitDiff.diff.split('\n').map((line, i) => (
+                <div key={i} className={`diff-line ${line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : line.startsWith('@@') ? 'hunk' : ''}`}>{line || ' '}</div>
+              ))}
+            </pre>
+          </div>
+        </div>
+      )}
 
       {gotoLineOpen && (
         <div className="goto-overlay" onClick={() => setGotoLineOpen(false)}>

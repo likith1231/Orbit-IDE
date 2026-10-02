@@ -1,16 +1,21 @@
 const express = require('express');
-const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const { execSync, spawn } = require('child_process');
+const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
 const validate = require('../middleware/validate');
+const authMiddleware = require('../middleware/auth');
 const { codeExecutionSchema } = require('../schemas');
+const config = require('../config');
+const { docker, ensureImage, listeningPorts, publishedPorts } = require('../lib/docker');
+const { materialize } = require('../lib/workspace');
+const { shQuote } = require('../lib/paths');
+const { previewPath } = require('../lib/preview');
 
 const router = express.Router();
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+router.use(authMiddleware);
 
-// One Docker image per language. Images download on first use (cached after).
+// One Docker image per language. Images are pulled automatically on first use.
 const IMAGES = {
   javascript: 'node:20-alpine',
   typescript: 'node:20-alpine',
@@ -23,210 +28,179 @@ const IMAGES = {
   rust: 'rust:1.78-slim',
   ruby: 'ruby:3.3-alpine',
   php: 'php:8.3-cli-alpine',
-  bash: 'bash:5.2-alpine',
+  bash: 'bash:5.2',
   perl: 'perl:5.38-slim',
   lua: 'akorn/lua:5.4-alpine',
   r: 'r-base:4.3.3',
   html: 'python:3.12-alpine',
 };
+// Languages that may need the network (package installs, dev servers).
+const NETWORKED = new Set(['javascript', 'typescript', 'python', 'html', 'csharp', 'go', 'ruby', 'php']);
+const PORTS = [3000, 5000, 5173, 8000, 8080];
+const MAX_RUNTIME_MS = 10 * 60 * 1000;
 
-// Builds the in-container shell command for each language.
-// fileName is whatever the user named their file; we normalize where the language requires it.
-function buildCmd(language, fileName, dir) {
+// Shell command run inside /sandbox. `dir` is the file's folder, `file` its name (both relative).
+function buildCmd(language, dir, file, hasPkg, hasReqs) {
+  const f = shQuote(file);
+  const cd = `cd /sandbox/${dir ? shQuote(dir) : ''}`;
+  const base = file.replace(/\.[^.]+$/, '');
   switch (language) {
-    case 'javascript': {
-      const hasPkg = fs.existsSync(path.join(dir, 'package.json'));
-      return ['sh', '-c', `cd /sandbox && ${hasPkg ? 'npm install && ' : ''}node ${fileName}`];
-    }
-    case 'typescript':
-      return ['sh', '-c', `cd /sandbox && npx -y tsx ${fileName}`];
-    case 'python': {
-      const hasReqs = fs.existsSync(path.join(dir, 'requirements.txt'));
-      return ['sh', '-c', `cd /sandbox && ${hasReqs ? 'pip install -r requirements.txt && ' : ''}python3 ${fileName}`];
-    }
-    case 'java': {
-      const className = fileName.replace(/\.java$/, '');
-      return ['sh', '-c', `cd /sandbox && javac ${fileName} && java ${className}`];
-    }
-    case 'c':
-      return ['sh', '-c', `cd /sandbox && gcc ${fileName} -o out -lm && ./out`];
-    case 'cpp':
-      return ['sh', '-c', `cd /sandbox && g++ ${fileName} -o out && ./out`];
-    case 'csharp':
-      return ['sh', '-c', `cd /sandbox && mkdir -p app && cd app && dotnet new console -o . --force >/dev/null 2>&1 && cp ../${fileName} Program.cs && dotnet run`];
-    case 'go':
-      return ['sh', '-c', `cd /sandbox && go run ${fileName}`];
-    case 'rust':
-      return ['sh', '-c', `cd /sandbox && rustc ${fileName} -o out 2>&1 && ./out`];
-    case 'ruby':
-      return ['ruby', `/sandbox/${fileName}`];
-    case 'php':
-      return ['php', `/sandbox/${fileName}`];
-    case 'bash':
-      return ['bash', `/sandbox/${fileName}`];
-    case 'perl':
-      return ['perl', `/sandbox/${fileName}`];
-    case 'lua':
-      return ['lua', `/sandbox/${fileName}`];
-    case 'r':
-      return ['Rscript', `/sandbox/${fileName}`];
-    case 'html':
-      return ['sh', '-c', `cd /sandbox && python3 -m http.server 8080`];
-    default:
-      return null;
+    case 'javascript': return `${hasPkg ? 'cd /sandbox && npm install --no-audit --no-fund --loglevel=error && ' : ''}${cd} && node ${f}`;
+    case 'typescript': return `${hasPkg ? 'cd /sandbox && npm install --no-audit --no-fund --loglevel=error && ' : ''}${cd} && npx -y tsx ${f}`;
+    case 'python': return `${hasReqs ? 'cd /sandbox && pip install -q -r requirements.txt && ' : ''}${cd} && python3 -u ${f}`;
+    case 'java': return `${cd} && javac ${f} && java ${shQuote(base)}`;
+    case 'c': return `${cd} && gcc ${f} -o /tmp/out -lm && /tmp/out`;
+    case 'cpp': return `${cd} && g++ ${f} -o /tmp/out && /tmp/out`;
+    case 'csharp': return `mkdir -p /tmp/app && cd /tmp/app && dotnet new console -o . --force >/dev/null 2>&1 && cp /sandbox/${dir ? shQuote(dir) + '/' : ''}${f} Program.cs && dotnet run`;
+    case 'go': return `${cd} && go run ${f}`;
+    case 'rust': return `${cd} && rustc ${f} -o /tmp/out && /tmp/out`;
+    case 'ruby': return `${cd} && ruby ${f}`;
+    case 'php': return `${cd} && php ${f}`;
+    case 'bash': return `${cd} && bash ${f}`;
+    case 'perl': return `${cd} && perl ${f}`;
+    case 'lua': return `${cd} && lua ${f}`;
+    case 'r': return `${cd} && Rscript ${f}`;
+    case 'html': return `${cd} && echo "Serving ${dir || '.'} on port 8080" && python3 -m http.server 8080 --bind 0.0.0.0`;
+    default: return null;
   }
 }
 
+// socketId -> { stream, container } so the client can type into a running program.
+const running = new Map();
+
+function ownedSocket(io, socketId, userId) {
+  const s = socketId && io?.sockets.sockets.get(socketId);
+  return s && s.data.userId === userId ? s : null;
+}
+
+async function removeUserSandboxes(userId) {
+  const existing = await docker.listContainers({ all: true, filters: { label: ['orbit.kind=sandbox', `orbit.user=${userId}`] } }).catch(() => []);
+  await Promise.all(existing.map(c => docker.getContainer(c.Id).remove({ force: true }).catch(() => {})));
+}
+
 router.post('/', validate(codeExecutionSchema), async (req, res) => {
-  const { code, language, fileName, socketId } = req.body;
+  const { code, language, fileName, filePath = '', projectFiles, socketId } = req.body;
+  const io = req.app.get('io');
+  const socket = ownedSocket(io, socketId, req.userId);
+  const emit = (event, payload) => socket?.emit(event, payload);
   const image = IMAGES[language];
-  let dir;
+  if (!image) return res.status(400).json({ error: `No runner for "${language}" yet.` });
+
+  const dir = path.join(config.sandboxRoot, crypto.randomUUID());
+  const cleanupDir = () => fs.rm(dir, { recursive: true, force: true }, () => {});
   try {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-'));
-    
-    if (req.body.projectFiles && Array.isArray(req.body.projectFiles)) {
-      for (const file of req.body.projectFiles) {
-        const fullPath = path.join(dir, file.path || '', file.name);
-        console.log(`Writing file ${file.name} to ${fullPath}, content length: ${(file.content || '').length}`);
-        if (file.isFolder) {
-          fs.mkdirSync(fullPath, { recursive: true });
-        } else {
-          fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-          fs.writeFileSync(fullPath, file.content || '');
-        }
-      }
+    if (Array.isArray(projectFiles) && projectFiles.length) {
+      await materialize(dir, projectFiles);
     } else {
-      const safeName = fileName || 'main';
-      fs.writeFileSync(path.join(dir, safeName), code || '');
+      await materialize(dir, [{ name: fileName, path: filePath, content: code || '' }]);
     }
+    const hasPkg = fs.existsSync(path.join(dir, 'package.json'));
+    const hasReqs = fs.existsSync(path.join(dir, 'requirements.txt'));
+    const cmd = buildCmd(language, filePath, fileName, hasPkg, hasReqs);
 
-    const cmd = buildCmd(language, fileName, dir);
-    if (!cmd) return res.status(400).json({ error: 'Unsupported language' });
-
-    // Kill any existing containers to free up ports
-    try {
-      const existing = await docker.listContainers({ filters: { label: ['ai-ide=true'] } });
-      for (const c of existing) {
-        await docker.getContainer(c.Id).remove({ force: true }).catch(() => {});
-      }
-    } catch (err) { console.error('Failed to cleanup old containers', err); }
+    await removeUserSandboxes(req.userId);
+    await ensureImage(image, msg => emit('sandbox-output', `\x1b[36m${msg}\x1b[0m\r\n`));
 
     const container = await docker.createContainer({
       Image: image,
-      Cmd: cmd,
+      Cmd: ['sh', '-c', cmd],
       WorkingDir: '/sandbox',
-      Labels: { 'ai-ide': 'true' },
-      ExposedPorts: {
-        '3000/tcp': {},
-        '5000/tcp': {},
-        '8080/tcp': {}
-      },
+      Labels: { 'orbit.kind': 'sandbox', 'orbit.user': req.userId },
+      Tty: true,
+      OpenStdin: true,
+      StdinOnce: false,
+      Env: ['TERM=xterm-256color', 'HOST=0.0.0.0', 'PYTHONUNBUFFERED=1'],
+      ExposedPorts: Object.fromEntries(PORTS.map(p => [`${p}/tcp`, {}])),
       HostConfig: {
         Binds: [`${dir}:/sandbox:rw`],
         Memory: 512 * 1024 * 1024,
-        NanoCpus: 1000000000,
+        NanoCpus: 1e9,
+        PidsLimit: 256,
+        SecurityOpt: ['no-new-privileges'],
         AutoRemove: true,
-        NetworkMode: ['typescript', 'csharp', 'javascript', 'python', 'html'].includes(language) ? 'bridge' : 'none',
-        PortBindings: {
-          '3000/tcp': [{ HostPort: '0' }],
-          '5000/tcp': [{ HostPort: '0' }],
-          '8080/tcp': [{ HostPort: '0' }]
-        },
+        NetworkMode: NETWORKED.has(language) ? 'bridge' : 'none',
+        PortBindings: NETWORKED.has(language)
+          ? Object.fromEntries(PORTS.map(p => [`${p}/tcp`, [{ HostIp: config.previewHost, HostPort: '0' }]]))
+          : {},
       },
-      Tty: false,
     });
 
-    const stream = await container.attach({ stream: true, stdout: true, stderr: true });
-    
-    const io = req.app.get('io');
-    stream.on('data', (chunk) => {
-      // Docker multiplexes stdout and stderr by adding an 8-byte header to each frame.
-      // A quick fix to avoid binary gibberish is to strip non-printable bytes or parse the header properly.
-      // Removing control characters 0x00-0x08 removes the header safely for plain text.
-      const clean = chunk.toString('utf8').replace(/[\x00-\x08]/g, '');
-      if (io && socketId) {
-        io.to(socketId).emit('sandbox-output', clean);
-      }
-    });
+    const stream = await container.attach({ stream: true, stdin: true, stdout: true, stderr: true, hijack: true });
+    const decoder = new StringDecoder('utf8');
+    stream.on('data', chunk => emit('sandbox-output', decoder.write(chunk)));
+    if (socketId) running.set(socketId, { stream, container });
 
     await container.start();
-
-    // Fetch mapped ports
-    const info = await container.inspect();
-    const ports = info.NetworkSettings.Ports;
-    const mappedPorts = {};
-    for (const [key, value] of Object.entries(ports || {})) {
-      if (value && value.length > 0) {
-        mappedPorts[key] = value[0].HostPort;
-      }
-    }
-
-    // Return immediately so the HTTP request doesn't hang
+    const mapped = publishedPorts(await container.inspect());
     res.json({ containerId: container.id, message: 'Sandbox started' });
 
-    // Dynamic port detection interval
-    const checkInterval = setInterval(async () => {
+    // Tell the client which ports the program is actually listening on, as preview URLs.
+    let lastSent = '';
+    const portTimer = setInterval(async () => {
       try {
-        const { State } = await container.inspect();
-        if (!State.Running) return clearInterval(checkInterval);
-
-        const exec = await container.exec({ Cmd: ['netstat', '-tlna'], AttachStdout: true });
-        const stream = await exec.start();
-        
-        stream.on('data', (chunk) => {
-          const out = chunk.toString('utf8');
-          const activeMappedPorts = {};
-          
-          for (const [key, value] of Object.entries(mappedPorts)) {
-             const internalPort = key.split('/')[0];
-             // Check if netstat shows listening on this port (e.g. :::3000 or 0.0.0.0:3000)
-             if ((out.includes(`:${internalPort} `) || out.includes(`:${internalPort}\t`) || new RegExp(`:${internalPort}\\s+.*LISTEN`).test(out))) {
-               activeMappedPorts[key] = value;
-             }
-          }
-          
-          if (Object.keys(activeMappedPorts).length > 0 && io && socketId) {
-             io.to(socketId).emit('sandbox-ports', activeMappedPorts);
-          }
-        });
-      } catch (err) {
-         clearInterval(checkInterval);
-      }
+        const listening = await listeningPorts(container);
+        const previews = {};
+        for (const p of listening) {
+          const hostPort = mapped[`${p}/tcp`];
+          if (hostPort) previews[p] = previewPath(hostPort, req.userId);
+        }
+        const key = Object.keys(previews).sort().join(',');
+        if (key && key !== lastSent) { lastSent = key; emit('sandbox-ports', previews); }
+      } catch { clearInterval(portTimer); }
     }, 2000);
 
-    // Cleanup when container finishes naturally or via stop
-    container.wait().then(() => {
-      clearInterval(checkInterval);
-      if (dir) fs.rm(dir, { recursive: true, force: true }, () => {});
-      if (io && socketId) io.to(socketId).emit('sandbox-exit', { code: 0 });
-    }).catch(err => {
-      clearInterval(checkInterval);
-      if (dir) fs.rm(dir, { recursive: true, force: true }, () => {});
-      if (io && socketId) io.to(socketId).emit('sandbox-exit', { error: err.message });
-    });
+    const killTimer = setTimeout(() => {
+      emit('sandbox-output', '\r\n\x1b[33mSandbox reached the 10 minute limit and was stopped.\x1b[0m\r\n');
+      container.kill().catch(() => {});
+    }, MAX_RUNTIME_MS);
 
-    // Max execution time of 10 minutes for long-running servers
-    setTimeout(async () => {
-      try { await container.stop(); } catch {}
-    }, 600000);
-
+    container.wait()
+      .then(r => emit('sandbox-exit', { code: r.StatusCode }))
+      .catch(err => emit('sandbox-exit', { error: err.message }))
+      .finally(() => {
+        clearInterval(portTimer);
+        clearTimeout(killTimer);
+        if (running.get(socketId)?.container === container) running.delete(socketId);
+        cleanupDir();
+      });
   } catch (err) {
     console.error('Sandbox run error:', err.message);
-    if (dir) fs.rm(dir, { recursive: true, force: true }, () => {});
-    res.status(500).json({ error: 'Execution failed: ' + err.message });
+    cleanupDir();
+    if (!res.headersSent) res.status(500).json({ error: 'Execution failed: ' + err.message });
   }
 });
 
 router.post('/stop', async (req, res) => {
-  const { containerId } = req.body;
+  const { containerId } = req.body || {};
   if (!containerId) return res.status(400).json({ error: 'Missing containerId' });
   try {
     const container = docker.getContainer(containerId);
-    await container.kill().catch(() => {}); // Kill instantly, ignore errors if already stopped
+    const info = await container.inspect().catch(() => null);
+    if (!info) return res.json({ success: true }); // already gone
+    if (info.Config.Labels?.['orbit.user'] !== req.userId) return res.status(404).json({ error: 'Not found' });
+    await container.kill().catch(() => {});
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// Socket handlers for interacting with the running program (stdin + resize).
+function attachSandboxIO(socket) {
+  socket.on('sandbox-input', (data) => {
+    if (typeof data === 'string') running.get(socket.id)?.stream.write(data);
+  });
+  socket.on('sandbox-resize', ({ cols, rows } = {}) => {
+    const r = running.get(socket.id);
+    if (r && cols > 0 && rows > 0) r.container.resize({ h: rows, w: cols }).catch(() => {});
+  });
+  socket.on('disconnect', () => {
+    const r = running.get(socket.id);
+    if (r) { running.delete(socket.id); r.container.kill().catch(() => {}); }
+  });
+}
+
 module.exports = router;
+module.exports.attachSandboxIO = attachSandboxIO;
+module.exports.IMAGES = IMAGES;
+module.exports.buildCmd = buildCmd;

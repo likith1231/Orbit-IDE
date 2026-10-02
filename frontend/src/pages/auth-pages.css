@@ -1,5 +1,6 @@
-/* === Global Typography === */
-* {
+/* === Typography (scoped: a global `*` rule here leaked into the IDE and broke the terminal font) === */
+.auth-page-container,
+.auth-page-container * {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
 }
 
