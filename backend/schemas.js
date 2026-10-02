@@ -51,7 +51,7 @@ const scaffoldSchema = z.object({
     isFolder: z.boolean().optional(),
     language: z.string().max(50).optional(),
     content: z.string().max(2_000_000).optional(),
-  })).max(500),
+  })).max(1000),
 });
 
 const chatMessages = z.array(z.object({

@@ -12,6 +12,7 @@ type Props = {
   projectId: string;
   fontFamily: string;
   visible: boolean;
+  appearance?: 'orbit' | 'midnight' | 'light';
   onOpenPreview: (url: string) => void;
 };
 
@@ -25,13 +26,22 @@ export type TerminalPanelHandle = {
 type Tab = { id: string; title: string };
 type Instance = { term: Terminal; fit: FitAddon; host: HTMLDivElement; observer: ResizeObserver; alive: boolean; heard: boolean; watchdog?: number };
 
-const THEME = {
-  background: '#1e1e1e', foreground: '#cccccc', cursor: '#cccccc', selectionBackground: '#264f78',
-  black: '#000000', red: '#cd3131', green: '#0dbc79', yellow: '#e5e510', blue: '#2472c8',
-  magenta: '#bc3fbc', cyan: '#11a8cd', white: '#e5e5e5', brightBlack: '#666666', brightRed: '#f14c4c',
-  brightGreen: '#23d18b', brightYellow: '#f5f543', brightBlue: '#3b8eea', brightMagenta: '#d670d6',
-  brightCyan: '#29b8db', brightWhite: '#e5e5e5',
+const ANSI_DARK = {
+  black: '#1b1e2b', red: '#ff6b81', green: '#5fd69a', yellow: '#ffd479', blue: '#6aa6ff',
+  magenta: '#c792ea', cyan: '#56d4e4', white: '#d5d8e6', brightBlack: '#5a6080', brightRed: '#ff8fa0',
+  brightGreen: '#7ee8b0', brightYellow: '#ffe09c', brightBlue: '#8fbcff', brightMagenta: '#d8adf2',
+  brightCyan: '#82e3ee', brightWhite: '#ffffff',
 };
+const TERMINAL_THEMES = {
+  orbit: { ...ANSI_DARK, background: '#0c0d14', foreground: '#d7dae8', cursor: '#a99dff', cursorAccent: '#0c0d14', selectionBackground: '#8b7bff44' },
+  midnight: { ...ANSI_DARK, background: '#030303', foreground: '#e0e0e0', cursor: '#60a5fa', cursorAccent: '#000', selectionBackground: '#3b82f644' },
+  light: {
+    background: '#fbfbfd', foreground: '#2a2d3a', cursor: '#5b4cff', cursorAccent: '#fff', selectionBackground: '#5b4cff33',
+    black: '#2a2d3a', red: '#d6284b', green: '#1a8a4c', yellow: '#a86b00', blue: '#2f5fd0', magenta: '#8a3fc2', cyan: '#0f7f8f', white: '#9aa0b4',
+    brightBlack: '#6b7186', brightRed: '#e8435f', brightGreen: '#23a35d', brightYellow: '#c27d00', brightBlue: '#4174e8', brightMagenta: '#9f55d6', brightCyan: '#15939f', brightWhite: '#2a2d3a',
+  },
+};
+type Appearance = keyof typeof TERMINAL_THEMES;
 
 const RUN_ID = '__run__';
 let counter = 0;
@@ -39,8 +49,8 @@ const newId = () => `t${Date.now().toString(36)}${(counter++).toString(36)}`;
 
 const withFallbacks = (f: string) => `${f}, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace`;
 
-function createXterm(fontFamily: string) {
-  const term = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: withFallbacks(fontFamily), theme: THEME, scrollback: 5000, allowProposedApi: true });
+function createXterm(fontFamily: string, appearance: Appearance) {
+  const term = new Terminal({ cursorBlink: true, fontSize: 13, lineHeight: 1.25, fontFamily: withFallbacks(fontFamily), theme: TERMINAL_THEMES[appearance], scrollback: 5000, allowProposedApi: true });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon());
@@ -48,7 +58,7 @@ function createXterm(fontFamily: string) {
 }
 
 const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPanel(
-  { socket, projectId, fontFamily, visible, onOpenPreview }, ref,
+  { socket, projectId, fontFamily, visible, appearance = 'orbit', onOpenPreview }, ref,
 ) {
   const [tabs, setTabs] = useState<Tab[]>(() => [{ id: newId(), title: 'bash' }]);
   const [active, setActive] = useState<string>(() => tabs[0].id);
@@ -62,6 +72,8 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
   // xterm callbacks are created once per terminal; read the socket through a ref so they never go stale.
   const socketRef = useRef(socket);
   socketRef.current = socket;
+  const appearanceRef = useRef<Appearance>(appearance);
+  appearanceRef.current = appearance;
 
   const fitAll = useCallback(() => {
     instances.current.forEach((inst) => {
@@ -92,7 +104,7 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
   const attach = useCallback((id: string, el: HTMLDivElement | null) => {
     hosts.current.set(id, el);
     if (!el || instances.current.has(id)) return;
-    const { term, fit } = createXterm(fontFamily);
+    const { term, fit } = createXterm(fontFamily, appearanceRef.current);
     term.open(el);
     const observer = new ResizeObserver(() => { if (el.offsetParent !== null) { try { fit.fit(); } catch { /* ignore */ } } });
     observer.observe(el);
@@ -174,6 +186,10 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
     const t = setTimeout(() => { fitAll(); instances.current.get(active)?.term.focus(); }, 30);
     return () => clearTimeout(t);
   }, [visible, active, splitId, fitAll]);
+
+  useEffect(() => {
+    instances.current.forEach(inst => { inst.term.options.theme = TERMINAL_THEMES[appearance]; });
+  }, [appearance]);
 
   // xterm measures glyph width once; re-measure after web fonts finish loading, or the
   // terminal renders with gaps between letters.
@@ -268,16 +284,16 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
           </div>
         ))}
         <div className="terminal-toolbar">
-          <select className="terminal-shell-select" value={shell} onChange={e => setShell(e.target.value as 'bash' | 'sh')} title="Shell for new terminals">
+          <select className="input input-xs terminal-shell-select" value={shell} onChange={e => setShell(e.target.value as 'bash' | 'sh')} title="Shell for new terminals">
             <option value="bash">bash</option>
             <option value="sh">sh</option>
           </select>
-          <button className="icon-btn" title="New terminal" onClick={addTab}><Plus size={14} /></button>
-          <button className={`icon-btn ${splitId ? 'on' : ''}`} title={splitId ? 'Close split' : 'Split terminal'} onClick={toggleSplit}><Columns2 size={14} /></button>
-          <button className="icon-btn" title="Restart shell" onClick={restartActive}><RotateCcw size={13} /></button>
-          <button className="icon-btn" title="Clear" onClick={clearActive}><Trash2 size={13} /></button>
+          <button className="btn btn-icon btn-sm" title="New terminal" onClick={addTab}><Plus size={14} /></button>
+          <button className={`btn btn-icon btn-sm ${splitId ? 'is-on' : ''}`} title={splitId ? 'Close split' : 'Split terminal'} onClick={toggleSplit}><Columns2 size={14} /></button>
+          <button className="btn btn-icon btn-sm" title="Restart shell" onClick={restartActive}><RotateCcw size={13} /></button>
+          <button className="btn btn-icon btn-sm" title="Clear" onClick={clearActive}><Trash2 size={13} /></button>
           <div style={{ position: 'relative' }}>
-            <button className="icon-btn" title="Ports served from the terminal (e.g. npm run dev)" onClick={loadPorts}><Globe size={14} /></button>
+            <button className="btn btn-icon btn-sm" title="Ports served from the terminal (e.g. npm run dev)" onClick={loadPorts}><Globe size={14} /></button>
             {ports && (
               <div className="ports-menu">
                 <div className="ports-menu-title">Listening ports</div>
@@ -285,8 +301,8 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
                 {Object.entries(ports).map(([port, path]) => (
                   <div key={port} className="ports-menu-row">
                     <span>:{port}</span>
-                    <button className="toggle-btn" onClick={() => { onOpenPreview(backendUrl(path)); setPorts(null); }}>Preview</button>
-                    <a className="toggle-btn" href={backendUrl(path)} target="_blank" rel="noreferrer">Open ↗</a>
+                    <button className="btn btn-primary btn-xs" onClick={() => { onOpenPreview(backendUrl(path)); setPorts(null); }}>Preview</button>
+                    <a className="btn btn-ghost btn-xs" href={backendUrl(path)} target="_blank" rel="noreferrer">Open ↗</a>
                   </div>
                 ))}
               </div>

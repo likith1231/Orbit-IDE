@@ -7,7 +7,10 @@
     "test": "jest",
     "start": "node server.js",
     "doctor": "node scripts/doctor.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "prestart": "node scripts/free-port.js",
+    "predev": "node scripts/free-port.js",
+    "stop": "node scripts/free-port.js"
   },
   "keywords": [],
   "author": "",

@@ -13,16 +13,14 @@ test('AI Assistant flow', async ({ page }) => {
 
   await expect(page).toHaveURL(/\/ide/);
 
-  const chatTab = page.locator('.ai-tab', { hasText: 'Chat' });
-  if (await chatTab.isVisible()) {
-    await chatTab.click();
-  }
+  test.setTimeout(120_000);
+  // The agent panel is open by default.
+  await page.fill('.chat-input', 'In one sentence, what does main.py do?');
+  await page.click('.send-btn');
 
-  await page.fill('.chat-input', 'explain this file');
-  await page.click('.chat-send-btn');
-
-  // Verify that an assistant response appears
-  // Look for a chat message from the assistant (excluding the loading dots)
-  const assistantMessage = page.locator('.chat-msg.assistant').filter({ hasNot: page.locator('.typing-dot') }).last();
-  await expect(assistantMessage).toBeVisible({ timeout: 30000 });
+  // A new assistant reply (after the welcome message) finishes streaming.
+  const replies = page.locator('.chat-msg.assistant .chat-bubble');
+  await expect(replies).toHaveCount(2, { timeout: 30000 });
+  await expect(replies.last()).not.toContainText('Thinking', { timeout: 90000 });
+  await expect(replies.last()).not.toBeEmpty();
 });
