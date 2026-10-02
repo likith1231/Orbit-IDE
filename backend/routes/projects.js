@@ -12,6 +12,7 @@ const { previewPath } = require('../lib/preview');
 const { findProjectContainer } = require('../lib/terminal');
 const config = require('../config');
 const { templateRows, templateList } = require('../lib/templates');
+const { verifyProject } = require('../lib/ai');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -245,6 +246,16 @@ router.get('/:projectId/download', loadProject, wrap(async (req, res) => {
     tar.stdout.pipe(res);
     tar.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.destroy(); });
     req.on('close', () => tar.kill());
+}));
+
+// Run the project's tests (or the best available check) in a throwaway sandbox.
+router.post('/:projectId/verify', loadProject, wrap(async (req, res) => {
+    const files = await prisma.file.findMany({ where: { projectId: req.project.id } });
+    const runPath = typeof req.body?.runPath === 'string' ? req.body.runPath : null;
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) controller.abort(); });
+    const result = await verifyProject({ files, runPath, signal: controller.signal, userId: req.userId });
+    res.json(result);
 }));
 
 // Pull changes made on disk (terminal, git, package managers) into the editor.

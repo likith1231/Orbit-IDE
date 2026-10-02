@@ -7,7 +7,7 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { MonacoBinding } from 'y-monaco';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Files, Search, ChevronRight, ChevronDown, LogOut, Command, Plus, FolderPlus, Trash2, Play, Pencil, Folder, FolderOpen, Zap, Bug, Minus, Settings, GitBranch, Layers, Square, RefreshCw, Rocket, ExternalLink, X, ShieldAlert, FileText, Download, Check, Edit2, MessageSquare, Sparkles, Eye, EyeOff, History, ArrowUp, Bot, Globe, Container, CirclePlay, Wand, MessageSquarePlus, LoaderCircle, CircleCheck, TriangleAlert, Info } from 'lucide-react';
+import { Files, Search, ChevronRight, ChevronDown, LogOut, Command, Plus, FolderPlus, Trash2, Play, Pencil, Folder, FolderOpen, Zap, Bug, Minus, Settings, GitBranch, Layers, Square, RefreshCw, Rocket, ExternalLink, X, ShieldAlert, FileText, Download, Check, Edit2, MessageSquare, Sparkles, Eye, EyeOff, History, ArrowUp, Bot, Globe, Container, CirclePlay, Wand, MessageSquarePlus, LoaderCircle, CircleCheck, TriangleAlert, Info, ShieldCheck } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import Fuse from 'fuse.js';
 import {
@@ -86,7 +86,10 @@ type Command = {
 };
 
 type ProposedChanges = { writes: { path: string; content: string }[]; deletes: string[] };
-type PendingChanges = { changes: ProposedChanges | null; run: string | null; summary: string; debugAttempt?: number };
+type ProofAttempt = { attempt: number; status: 'passed' | 'failed' | 'skipped'; summary: string; label: string; durationMs?: number };
+type Proof = { status: 'passed' | 'failed' | 'skipped'; summary: string; label: string; kind: string | null; output: string; attempts: ProofAttempt[] };
+type ProofLive = { attempt: number; phase: 'start' | 'result' | 'revising'; status?: string; summary?: string; label?: string }[];
+type PendingChanges = { changes: ProposedChanges | null; run: string | null; summary: string; debugAttempt?: number; verification?: Proof | null };
 
 const WELCOME_MESSAGE = "Hi! I'm **Orbit**, your Claude-powered coding agent. I can see every file in this project.\n\nTry asking:\n\n- *Build a REST API with login*\n- *Why does main.py crash?*\n- *Add tests for utils.js and run them*\n- Select code and press **Ctrl+I** to ask about it\n\nEvery change I propose is shown as a diff for you to accept first.";
 
@@ -416,11 +419,16 @@ export default function IDE() {
   const [newItemParent, setNewItemParent] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: WELCOME_MESSAGE }]);
   const [autoDebugEnabled, setAutoDebugEnabled] = useState<boolean>(pref('autoDebug', true));
+  const [verifyEnabled, setVerifyEnabled] = useState<boolean>(pref('verify', true));
+  const [proofLive, setProofLive] = useState<ProofLive>([]);
+  const [proofOutputOpen, setProofOutputOpen] = useState(false);
+  const [testResult, setTestResult] = useState<(Proof & { running?: boolean }) | null>(null);
   const [runFailure, setRunFailure] = useState<{ code: number; output: string } | null>(null);
   const [debugHistory, setDebugHistory] = useState<DebugHistoryEntry[]>([]);
   const [chatSessions, setChatSessions] = useState<{ id: string, name: string }[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const freshSessionRef = useRef<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editSessionName, setEditSessionName] = useState('');
   const [chatSidebarOpen, setChatSidebarOpen] = useState(false);
@@ -507,10 +515,10 @@ export default function IDE() {
   useEffect(() => {
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-        fontSize, codeFont, minimap: minimapEnabled, wordWrap, theme, extensions: extensionStates, autoDebug: autoDebugEnabled, showAI: showAIPanel,
+        fontSize, codeFont, minimap: minimapEnabled, wordWrap, theme, extensions: extensionStates, autoDebug: autoDebugEnabled, showAI: showAIPanel, verify: verifyEnabled,
       }));
     } catch { /* storage unavailable */ }
-  }, [fontSize, codeFont, minimapEnabled, wordWrap, theme, extensionStates, autoDebugEnabled, showAIPanel]);
+  }, [fontSize, codeFont, minimapEnabled, wordWrap, theme, extensionStates, autoDebugEnabled, showAIPanel, verifyEnabled]);
 
   useEffect(() => {
     document.documentElement.style.setProperty('--code-font', codeFont);
@@ -1213,6 +1221,9 @@ export default function IDE() {
   }, [project, loadChatSessions]);
 
   useEffect(() => {
+    // A session created by sendChatMessage already has its messages on screen (and a reply
+    // streaming in); reloading it here would replace them mid-stream.
+    if (activeSessionId && activeSessionId === freshSessionRef.current) return;
     if (activeSessionId) {
       loadChatMessages(activeSessionId);
     }
@@ -1230,7 +1241,8 @@ export default function IDE() {
   // Send a message to Claude. Text streams in; proposed file changes arrive at the end for review.
   const sendChatMessage = async (overrideText?: string, selection?: string) => {
     const userText = (overrideText ?? chatInput).trim();
-    if (!userText || chatLoading || !project) return;
+    if (!userText || chatLoading) return;
+    if (!project) { toast('Open or create a project first — the agent works on project files.', 'info'); return; }
     setShowAIPanel(true);
     setAiTab('chat');
 
@@ -1243,6 +1255,7 @@ export default function IDE() {
         if (res.ok) {
           const data = await res.json();
           currentSessionId = data.session.id;
+          freshSessionRef.current = currentSessionId;
           setActiveSessionId(currentSessionId);
           setChatSessions(prev => [data.session, ...prev]);
         }
@@ -1255,6 +1268,7 @@ export default function IDE() {
     setChatMessages(m => [...m, { role: 'user', content: shown }, { role: 'assistant', content: '' }]);
     if (overrideText === undefined) setChatInput('');
     setChatLoading(true);
+    setProofLive([]);
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
@@ -1276,6 +1290,7 @@ export default function IDE() {
           activeFile: activeData ? { path: relPath(activeData), content: activeData.value } : null,
           selection: selection || null,
           model: selectedModel,
+          verify: verifyEnabled,
         }),
       });
       if (!res.ok || !res.body) {
@@ -1297,12 +1312,14 @@ export default function IDE() {
           if (!line) continue;
           const evt = JSON.parse(line.slice(6));
           if (evt.type === 'text') setLastAssistant(prev => prev + evt.text);
+          else if (evt.type === 'verify') setProofLive(prev => [...prev, { attempt: evt.attempt, phase: evt.phase, status: evt.status, summary: evt.summary, label: evt.label }]);
           else if (evt.type === 'error') throw new Error(evt.error);
           else if (evt.type === 'done') {
             finalReply = evt.reply;
             setLastAssistant(() => evt.reply);
             if (evt.changes) {
-              setPendingAIAction({ changes: evt.changes, run: evt.run, summary: evt.reply });
+              setPendingAIAction({ changes: evt.changes, run: evt.run, summary: evt.reply, verification: evt.verification });
+              setProofOutputOpen(false);
               setReviewFile(evt.changes.writes[0]?.path || null);
             } else if (evt.run) {
               const target = allFiles.find(f => relPath(f) === evt.run);
@@ -1593,6 +1610,24 @@ export default function IDE() {
     java: { icon: <FaJava size={22} color="#5382A1" />, blurb: 'Java with Scanner input' },
     blank: { icon: <FileText size={22} />, blurb: 'Start from scratch' },
   };
+
+  // Run the project's tests (or the best available check) in a throwaway sandbox.
+  const runTests = async () => {
+    if (!project) return;
+    setTestResult({ status: 'skipped', summary: '', label: '', kind: null, output: '', attempts: [], running: true });
+    try {
+      const res = await apiFetch(`/api/projects/${project.id}/verify`, { method: 'POST', body: JSON.stringify({}) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setTestResult({ ...data, attempts: [] });
+      toast(`${data.status === 'passed' ? '✓' : data.status === 'failed' ? '✗' : '–'} ${data.label || 'Check'}: ${data.summary}`, data.status === 'failed' ? 'error' : data.status === 'passed' ? 'success' : 'info');
+    } catch (e: any) {
+      setTestResult(null);
+      toast(`Could not run tests: ${e.message}`, 'error');
+    }
+  };
+
+  const proofIcon = (status?: string) => status === 'passed' ? <CircleCheck size={13} /> : status === 'failed' ? <X size={13} /> : <Info size={13} />;
 
   const quickCreateProject = async (template: string) => {
     const label = templates.find(t => t.id === template)?.label || 'project';
@@ -1974,8 +2009,25 @@ export default function IDE() {
                       ))}
                       {!runnableFiles.length && <div className="empty-hint">No runnable files yet.</div>}
                     </div>
+                    <div className="section-title">Tests</div>
+                    <div className="panel-body">
+                      <button className="btn btn-ghost btn-block" onClick={runTests} disabled={!project || testResult?.running}>
+                        {testResult?.running ? <LoaderCircle size={13} className="spin" /> : <ShieldCheck size={13} />} {testResult?.running ? 'Running tests…' : 'Run tests'}
+                      </button>
+                      {testResult && !testResult.running && (
+                        <div className={`proof-card ${testResult.status}`}>
+                          <div className="proof-card-main">{proofIcon(testResult.status)} <b>{testResult.label || 'Check'}</b> — {testResult.summary}</div>
+                          {testResult.output && <pre className="proof-output">{testResult.output.slice(-3000)}</pre>}
+                        </div>
+                      )}
+                      <div className="meta-line">Runs <code>npm test</code>, <code>pytest</code> or <code>node --test</code> in a clean sandbox — or compiles your code if there are no tests.</div>
+                    </div>
                     <div className="section-title">Options</div>
                     <div className="panel-body">
+                      <label className="switch-row">
+                        <span><b>Prove AI changes</b><small>Claude's edits are tested in a sandbox, and fixed if they fail, before you see them.</small></span>
+                        <input type="checkbox" className="switch" checked={verifyEnabled} onChange={() => setVerifyEnabled(v => !v)} />
+                      </label>
                       <label className="switch-row">
                         <span><b>AI auto-fix</b><small>When a run fails, Claude proposes a fix using the real error.</small></span>
                         <input type="checkbox" className="switch" checked={autoDebugEnabled} onChange={() => setAutoDebugEnabled(v => !v)} />
@@ -2080,6 +2132,7 @@ export default function IDE() {
                         <label className="switch-row"><span><b>Minimap</b></span><input type="checkbox" className="switch" checked={minimapEnabled} onChange={() => setMinimapEnabled(v => !v)} /></label>
                         <label className="switch-row"><span><b>Word wrap</b></span><input type="checkbox" className="switch" checked={wordWrap} onChange={() => setWordWrap(v => !v)} /></label>
                         <label className="switch-row"><span><b>AI auto-fix failed runs</b></span><input type="checkbox" className="switch" checked={autoDebugEnabled} onChange={() => setAutoDebugEnabled(v => !v)} /></label>
+                        <label className="switch-row"><span><b>Prove AI changes</b><small>Test Claude's edits in a sandbox (and let it fix failures) before you review them.</small></span><input type="checkbox" className="switch" checked={verifyEnabled} onChange={() => setVerifyEnabled(v => !v)} /></label>
                       </div>
                       <div className="section-title">Keyboard shortcuts</div>
                       <div className="shortcut-list">
@@ -2370,9 +2423,54 @@ export default function IDE() {
                         ))}
                       </div>
 
+                      {chatLoading && proofLive.length > 0 && (
+                        <div className="proof-live">
+                          <div className="proof-live-title"><ShieldCheck size={13} /> Proving the change works</div>
+                          {proofLive.map((e, i) => (
+                            <div key={i} className={`proof-step ${e.phase === 'result' ? e.status : e.phase}`}>
+                              {e.phase === 'start' ? <LoaderCircle size={12} className={i === proofLive.length - 1 ? 'spin' : ''} /> : e.phase === 'revising' ? <RefreshCw size={12} className={i === proofLive.length - 1 ? 'spin' : ''} /> : proofIcon(e.status)}
+                              <span>
+                                {e.phase === 'start' && <>Attempt {e.attempt}: testing in a sandbox…</>}
+                                {e.phase === 'result' && <>Attempt {e.attempt}: <b>{e.label}</b> — {e.summary}</>}
+                                {e.phase === 'revising' && <>Claude is fixing the failure…</>}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {pendingAIAction && (
                         <div className="ai-review-panel">
-                          <div className="ai-review-head"><Sparkles size={13} /> Review changes</div>
+                          <div className="ai-review-head">
+                            <Sparkles size={13} /> Review changes
+                            {pendingAIAction.verification && (
+                              <span className={`proof-badge ${pendingAIAction.verification.status}`} title={pendingAIAction.verification.label}>
+                                {pendingAIAction.verification.status === 'passed' ? <ShieldCheck size={12} /> : pendingAIAction.verification.status === 'failed' ? <ShieldAlert size={12} /> : <Info size={12} />}
+                                {pendingAIAction.verification.status === 'passed' ? 'Verified' : pendingAIAction.verification.status === 'failed' ? 'Not verified' : 'Untested'}
+                              </span>
+                            )}
+                          </div>
+                          {pendingAIAction.verification && (
+                            <div className={`proof-card ${pendingAIAction.verification.status}`}>
+                              <div className="proof-card-main">
+                                <b>{pendingAIAction.verification.label || 'Proof'}</b> — {pendingAIAction.verification.summary}
+                                {pendingAIAction.verification.attempts.length > 1 && <> · after {pendingAIAction.verification.attempts.length} attempts</>}
+                              </div>
+                              {pendingAIAction.verification.attempts.length > 1 && (
+                                <div className="proof-attempts">
+                                  {pendingAIAction.verification.attempts.map(a => (
+                                    <span key={a.attempt} className={`proof-dot ${a.status}`} title={`Attempt ${a.attempt}: ${a.summary}`}>{a.attempt}</span>
+                                  ))}
+                                </div>
+                              )}
+                              {pendingAIAction.verification.output && (
+                                <>
+                                  <button className="link-btn" onClick={() => setProofOutputOpen(v => !v)}>{proofOutputOpen ? 'Hide' : 'Show'} output</button>
+                                  {proofOutputOpen && <pre className="proof-output">{pendingAIAction.verification.output.slice(-4000)}</pre>}
+                                </>
+                              )}
+                            </div>
+                          )}
                           <ul className="ai-review-files">
                             {pendingAIAction.changes?.writes.map(w => {
                               const exists = allFiles.some(f => relPath(f) === w.path);
