@@ -23,7 +23,7 @@ export type TerminalPanelHandle = {
 };
 
 type Tab = { id: string; title: string };
-type Instance = { term: Terminal; fit: FitAddon; host: HTMLDivElement; observer: ResizeObserver; alive: boolean };
+type Instance = { term: Terminal; fit: FitAddon; host: HTMLDivElement; observer: ResizeObserver; alive: boolean; heard: boolean; watchdog?: number };
 
 const THEME = {
   background: '#1e1e1e', foreground: '#cccccc', cursor: '#cccccc', selectionBackground: '#264f78',
@@ -73,7 +73,19 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
     const inst = instances.current.get(id);
     if (!inst || !socketRef.current) return;
     inst.alive = true;
+    inst.heard = false;
+    inst.term.write('\x1b[90mStarting terminal…\x1b[0m');
     socketRef.current.emit('term:open', { termId: id, projectId, cols: inst.term.cols, rows: inst.term.rows, shell: shellRef.current });
+    // If the server never answers, say why instead of showing a blank screen.
+    clearTimeout(inst.watchdog);
+    inst.watchdog = window.setTimeout(() => {
+      if (inst.heard || !inst.alive) return;
+      inst.term.writeln('\r\n\x1b[33mThe server did not start a terminal.\x1b[0m');
+      inst.term.writeln('\x1b[33mMost likely the backend is still running OLD code. Stop it (Ctrl+C) and start it again\x1b[0m');
+      inst.term.writeln('\x1b[33mwith "npm start" in backend/ — its log should say "Terminal: docker". Check with "npm run doctor".\x1b[0m');
+      inst.term.writeln('\x1b[90mPress Enter to try again.\x1b[0m');
+      inst.alive = false;
+    }, 15000);
   }, [projectId]);
 
   // Create xterm instances as their host divs mount.
@@ -84,7 +96,7 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
     term.open(el);
     const observer = new ResizeObserver(() => { if (el.offsetParent !== null) { try { fit.fit(); } catch { /* ignore */ } } });
     observer.observe(el);
-    const inst: Instance = { term, fit, host: el, observer, alive: false };
+    const inst: Instance = { term, fit, host: el, observer, alive: false, heard: false };
     instances.current.set(id, inst);
     try { fit.fit(); } catch { /* not visible yet */ }
 
@@ -108,7 +120,16 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
   // Socket events -> terminals.
   useEffect(() => {
     if (!socket) return;
-    const onData = ({ termId, data }: { termId: string; data: string }) => instances.current.get(termId)?.term.write(data);
+    const onData = ({ termId, data }: { termId: string; data: string }) => {
+      const inst = instances.current.get(termId);
+      if (!inst) return;
+      if (!inst.heard) { inst.heard = true; inst.term.write('\r\x1b[2K'); } // clear "Starting terminal…"
+      inst.term.write(data);
+    };
+    const onReady = ({ termId }: { termId: string }) => {
+      const inst = instances.current.get(termId);
+      if (inst && !inst.heard) { inst.heard = true; inst.term.write('\r\x1b[2K'); }
+    };
     const onExit = ({ termId }: { termId: string }) => {
       const inst = instances.current.get(termId);
       if (!inst) return;
@@ -125,11 +146,13 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
       });
     };
     socket.on('term:data', onData);
+    socket.on('term:ready', onReady);
     socket.on('term:exit', onExit);
     socket.on('sandbox-output', onSandboxOut);
     socket.io.on('reconnect', onReconnect);
     return () => {
       socket.off('term:data', onData);
+      socket.off('term:ready', onReady);
       socket.off('term:exit', onExit);
       socket.off('sandbox-output', onSandboxOut);
       socket.io.off('reconnect', onReconnect);

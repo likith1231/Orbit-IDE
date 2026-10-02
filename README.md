@@ -15,7 +15,10 @@ A cloud IDE in the browser: Monaco editor, real terminals, multi-language code e
 - **Collaboration**: open the same file in two browsers and edit together (Yjs).
 - **Chaos testing**: run your code under memory limits, CPU throttling, kills and network cuts and get a resilience score.
 - **One-click deploy**: keep a project running in a container with a shareable URL.
+- **Project templates**: start from Python, Node + Express, Flask, a static website, C++ or Java.
+- **Clone from GitHub**: "Clone Git Repository" on the welcome screen imports any public repo.
 - Search/replace across files, command palette (Ctrl+Shift+P), go to line, project download (.tar.gz), chat history.
+- The IDE shows a banner if the backend is unreachable, outdated, or missing its database or AI key.
 
 ## Local development
 
@@ -27,7 +30,8 @@ cd backend
 npm install
 cp .env.example .env          # set DATABASE_URL, JWT_SECRET, ANTHROPIC_API_KEY
 npx prisma migrate deploy
-npm start                     # http://localhost:5000
+npm run doctor                # checks .env, database, Docker and your Claude key
+npm run dev                   # http://localhost:5000, restarts automatically when code changes
 
 # Build the terminal image once (node + python + git + build tools).
 # Optional: without it terminals fall back to node:20-bookworm-slim.
@@ -54,7 +58,7 @@ Set `VITE_API_URL` in `frontend/.env.local` if the backend isn't at `http://loca
 
 ### AI configuration
 
-Set `ANTHROPIC_API_KEY` in `backend/.env`. `CLAUDE_MODEL` picks the default chat model (`claude-opus-5-5`; users can switch to Sonnet 5.5 or Haiku 4.5 in the chat panel). Inline autocomplete uses `CLAUDE_FAST_MODEL` (`claude-haiku-4-5`) because it runs on every typing pause.
+Set `ANTHROPIC_API_KEY` in `backend/.env` (`CLAUDE_API_KEY` also works). Restart the backend after changing `.env`. `CLAUDE_MODEL` picks the default chat model (`claude-opus-5-5`; users can switch to Sonnet 5.5 or Haiku 4.5 in the chat panel). Inline autocomplete uses `CLAUDE_FAST_MODEL` (`claude-haiku-4-5`) because it runs on every typing pause.
 
 ## Deploying
 

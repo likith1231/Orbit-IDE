@@ -51,7 +51,15 @@ app.get('/api/health', async (req, res) => {
     dockerAvailable(),
     resolveMode(),
   ]);
-  res.status(db ? 200 : 503).json({ ok: db, db, docker: dockerOk, terminal, ai: ai.enabled() });
+  res.status(db ? 200 : 503).json({
+    ok: db,
+    version: require('./package.json').version,
+    db,
+    docker: dockerOk,
+    terminal,
+    ai: ai.enabled(),
+    aiReason: ai.enabled() ? null : 'ANTHROPIC_API_KEY is not set in backend/.env',
+  });
 });
 
 app.use('/api/auth', authRoutes);
@@ -149,8 +157,12 @@ if (require.main === module) {
   server.listen(config.port, config.host, async () => {
     const [dockerOk, terminal] = await Promise.all([dockerAvailable(), resolveMode()]);
     console.log(`🚀 Orbit IDE backend on http://${config.host}:${config.port}`);
-    console.log(`🤖 AI: ${ai.enabled() ? `Claude (${config.claudeModel})` : 'disabled — set ANTHROPIC_API_KEY'}`);
+    console.log(`🤖 AI: ${ai.enabled() ? `Claude (${config.claudeModel})` : 'DISABLED — add ANTHROPIC_API_KEY=... to backend/.env and restart'}`);
+    if (!ai.enabled() && process.env.GEMINI_API_KEY) console.log('   (GEMINI_API_KEY is no longer used — Orbit now uses Claude.)');
     console.log(`🐳 Docker: ${dockerOk ? 'connected' : 'not available'} · 🖥  Terminal: ${terminal}`);
+    if (!dockerOk) console.log('   Docker is not reachable: Run, Chaos Test and the Docker terminal need it. Is Docker running? Can this user run `docker ps`?');
+    if (terminal === 'local') console.log('   Terminal is running shells directly on this machine (TERMINAL_MODE=local / no Docker).');
+    if (process.env.TERMINAL_ENABLED) console.log('   (TERMINAL_ENABLED is no longer used — see TERMINAL_MODE in .env.example.)');
     console.log(`🌐 CORS origins: ${config.corsOrigins.join(', ')}${config.signupEnabled ? '' : ' · signups disabled'}`);
     cleanupStaleContainers().catch(() => {});
   });

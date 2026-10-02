@@ -26,7 +26,8 @@ const projectSchema = z.object({
   name: z.string()
     .min(1, 'Project name is required')
     .max(100, 'Project name must not exceed 100 characters')
-    .refine(val => !pathTraversalRegex.test(val), 'Invalid characters in project name')
+    .refine(val => !pathTraversalRegex.test(val), 'Invalid characters in project name'),
+  template: z.string().max(50).optional(),
 });
 
 const fileSchema = z.object({

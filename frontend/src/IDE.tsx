@@ -291,6 +291,8 @@ export default function IDE() {
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('orbit_model') || 'claude-opus-5-5');
   const [aiModels, setAiModels] = useState<{ id: string; label: string; sub: string }[]>([]);
   const [aiEnabled, setAiEnabled] = useState(true);
+  const [backendIssue, setBackendIssue] = useState<null | 'unreachable' | 'outdated' | 'db' | 'ai'>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [sandboxId, setSandboxId] = useState<string | null>(null);
   const [deployState, setDeployState] = useState<'idle' | 'deploying' | 'deployed' | 'error'>('idle');
@@ -320,6 +322,11 @@ export default function IDE() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectTemplate, setNewProjectTemplate] = useState('python');
+  const [templates, setTemplates] = useState<{ id: string; label: string }[]>([]);
+  useEffect(() => {
+    apiFetch('/api/projects/templates').then(r => r.json()).then(d => setTemplates(d.templates || [])).catch(() => {});
+  }, []);
   const [fontSize, setFontSize] = useState(14);
   const [codeFont, setCodeFont] = useState(CODE_FONTS[0].family);
   const [minimapEnabled, setMinimapEnabled] = useState(true);
@@ -361,6 +368,13 @@ export default function IDE() {
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [pendingAIAction, setPendingAIAction] = useState<PendingChanges | null>(null);
   const [reviewFile, setReviewFile] = useState<string | null>(null);
+  const [reviewSeq, setReviewSeq] = useState(0);
+  // Dispose the diff models of a finished review (they're kept alive while mounted, see DiffEditor).
+  const disposeReviewModels = useCallback(() => {
+    const m = monacoRef.current;
+    m?.editor.getModels().forEach((model: any) => { if (model.uri.toString().includes(`review-${reviewSeq}-`)) setTimeout(() => model.dispose(), 0); });
+    setReviewSeq(s => s + 1);
+  }, [reviewSeq]);
 
 
   const saveTimeout = useRef<number | null>(null);
@@ -405,6 +419,14 @@ export default function IDE() {
       // Reopen the most recent project instead of landing on an empty screen.
       if (list.length && !project) loadProject(list[0].id);
     });
+    // Detect a backend that's unreachable or still running old code.
+    apiFetch('/api/health').then(async (r) => {
+      const data = await r.json().catch(() => null);
+      if (!data || !data.version) setBackendIssue('outdated');
+      else if (!data.db) setBackendIssue('db');
+      else if (!data.ai) setBackendIssue('ai');
+      else setBackendIssue(null);
+    }).catch(() => setBackendIssue('unreachable'));
     apiFetch('/api/ai/models').then(r => r.json()).then((data) => {
       setAiEnabled(!!data.enabled);
       setAiModels(data.models || []);
@@ -419,35 +441,40 @@ export default function IDE() {
     document.documentElement.style.setProperty('--code-font', codeFont);
   }, [codeFont]);
 
-  const bindYjs = useCallback((editor: any, monaco: any, fileId: string) => {
+  const yRoomRef = useRef<{ room: string; model: any } | null>(null);
+  const bindYjs = useCallback((editor: any, _monaco: any, fileId: string) => {
     if (!project) return;
-    if (yBindingRef.current) yBindingRef.current.destroy();
-    if (yProviderRef.current) yProviderRef.current.destroy();
-    if (ydocRef.current) ydocRef.current.destroy();
-
-    const ydoc = new Y.Doc();
-    ydocRef.current = ydoc;
-
-    const roomName = `${project.id}-${fileId}`;
-    const provider = new WebsocketProvider(`${WS_URL}/yjs`, roomName, ydoc, { params: { token: getToken() || '' } });
-    yProviderRef.current = provider;
-
-    const ytext = ydoc.getText('monaco');
     const model = editor.getModel();
+    const roomName = `${project.id}-${fileId}`;
+    // Already bound to this file's model (onMount and the activeFile effect both call us).
+    if (yRoomRef.current && yRoomRef.current.room === roomName && yRoomRef.current.model === model) return;
+
+    // Tear down the previous binding completely. (Not clearing these refs used to leave the
+    // new connection thinking a binding already existed, so it never attached.)
+    yBindingRef.current?.destroy();
+    yProviderRef.current?.destroy();
+    ydocRef.current?.destroy();
+    yBindingRef.current = null;
+    yProviderRef.current = null;
+    ydocRef.current = null;
+    yRoomRef.current = null;
     if (!model) return;
 
-    // Wait for the initial sync from the server before binding Monaco,
-    // so that the editor isn't wiped by an initially empty local ytext.
-    provider.on('synced', () => {
-      if (!yBindingRef.current) {
-        // If the server was completely empty (e.g., new file) but we have local content from Postgres,
-        // hydrate the CRDT before binding to prevent wiping the editor.
-        if (ytext.length === 0 && model.getValue().length > 0) {
-          ytext.insert(0, model.getValue());
-        }
-        const binding = new MonacoBinding(ytext, model, new Set([editor]), provider.awareness);
-        yBindingRef.current = binding;
-      }
+    const ydoc = new Y.Doc();
+    const provider = new WebsocketProvider(`${WS_URL}/yjs`, roomName, ydoc, { params: { token: getToken() || '' } });
+    ydocRef.current = ydoc;
+    yProviderRef.current = provider;
+    yRoomRef.current = { room: roomName, model };
+    const ytext = ydoc.getText('monaco');
+
+    // Wait for the initial sync from the server before binding Monaco, so the editor
+    // isn't wiped by an initially empty local ytext. 'synced' fires again on reconnect.
+    provider.on('synced', (isSynced: boolean) => {
+      if (!isSynced || yProviderRef.current !== provider || yBindingRef.current) return;
+      if (model.isDisposed?.()) return;
+      // A room nobody has opened yet is empty: seed it with what the editor shows.
+      if (ytext.length === 0 && model.getValue().length > 0) ytext.insert(0, model.getValue());
+      yBindingRef.current = new MonacoBinding(ytext, model, new Set([editor]), provider.awareness);
     });
   }, [project]);
 
@@ -974,6 +1001,7 @@ export default function IDE() {
     const { changes, run, debugAttempt } = pendingAIAction;
     setPendingAIAction(null);
     setReviewFile(null);
+    disposeReviewModels();
     try {
       if (changes?.writes.length) {
         const items = changes.writes.map(w => {
@@ -1024,6 +1052,7 @@ export default function IDE() {
     if (pendingAIAction?.debugAttempt) setDebugHistory(h => h.map(e => e.attempt === pendingAIAction.debugAttempt ? { ...e, status: 'failed' } : e));
     setPendingAIAction(null);
     setReviewFile(null);
+    disposeReviewModels();
     setChatMessages(m => [...m, { role: 'assistant', content: '❌ Changes rejected.' }]);
   };
 
@@ -1289,14 +1318,26 @@ export default function IDE() {
     setExpanded(prev => { const next = new Set(prev); next.has(path) ? next.delete(path) : next.add(path); return next; });
   };
 
+  const cloneRepo = async () => {
+    const url = window.prompt('Public git repository URL (https://...)', 'https://github.com/');
+    if (!url || url === 'https://github.com/') return;
+    const res = await apiFetch('/api/projects/clone', { method: 'POST', body: JSON.stringify({ url }) });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Clone failed'); return; }
+    await fetchProjects();
+    loadProject(data.project.id);
+    setShowProjectPicker(false);
+  };
+
   const createProject = async () => {
     const name = newProjectName.trim();
     if (!name) return;
     const res = await apiFetch(`/api/projects`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, template: newProjectTemplate }),
     });
     const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Could not create project'); return; }
     setNewProjectName('');
     await fetchProjects();
     loadProject(data.project.id);
@@ -1417,6 +1458,9 @@ export default function IDE() {
     { id: 'new-file', label: '+ New File', action: () => { setActivityPanel('explorer'); setShowNewItem('file'); } },
     { id: 'new-folder', label: '+ New Folder', action: () => { setActivityPanel('explorer'); setShowNewItem('folder'); } },
     { id: 'new-project', label: '+ New Project', action: () => setShowProjectPicker(true) },
+    { id: 'clone', label: 'Git: Clone Repository into New Project', action: cloneRepo },
+    { id: 'download', label: 'Download Project (.tar.gz)', action: downloadProject },
+    { id: 'sync', label: 'Sync Files Changed in Terminal', action: importFromWorkspace },
     { id: 'toggle-minimap', label: `${minimapEnabled ? 'Hide' : 'Show'} Minimap`, action: () => setMinimapEnabled(v => !v) },
     { id: 'toggle-wrap', label: `${wordWrap ? 'Disable' : 'Enable'} Word Wrap`, action: () => setWordWrap(v => !v) },
     { id: 'font-increase', label: 'Increase Font Size', action: () => setFontSize(f => Math.min(f + 1, 24)) },
@@ -1497,6 +1541,18 @@ export default function IDE() {
         </div>
       </header>
 
+      {backendIssue && !bannerDismissed && (
+        <div className={`backend-banner ${backendIssue === 'ai' ? 'warn' : 'error'}`}>
+          <span>
+            {backendIssue === 'unreachable' && <>Can't reach the backend at <code>{backendUrl('')}</code>. Is it running? (<code>cd backend && npm start</code>)</>}
+            {backendIssue === 'outdated' && <>The backend is running an <b>old version</b>. Stop it (Ctrl+C) and start it again with <code>npm start</code> in <code>backend/</code> — the terminal and AI won't work until then.</>}
+            {backendIssue === 'db' && <>The backend can't reach its database. Check <code>DATABASE_URL</code> and run <code>npm run doctor</code> in <code>backend/</code>.</>}
+            {backendIssue === 'ai' && <>AI is off: add <code>ANTHROPIC_API_KEY=sk-ant-…</code> to <code>backend/.env</code> and restart the backend.</>}
+          </span>
+          <button className="icon-btn" onClick={() => setBannerDismissed(true)} title="Dismiss"><X size={14} /></button>
+        </div>
+      )}
+
       {showProjectPicker && (
         <div className="project-picker">
           <div className="project-picker-header">Projects</div>
@@ -1507,9 +1563,17 @@ export default function IDE() {
             </div>
           ))}
           <div className="project-new-row">
-            <input className="new-file-input" placeholder="New project name..." value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createProject()} />
-            <button className="icon-btn" onClick={createProject}>+</button>
+            <input className="new-file-input" autoFocus placeholder="New project name..." value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createProject()} />
+            <button className="icon-btn" onClick={createProject} title="Create project">+</button>
           </div>
+          {templates.length > 0 && (
+            <div className="project-template-row">
+              <span>Start from</span>
+              <select className="font-select" value={newProjectTemplate} onChange={e => setNewProjectTemplate(e.target.value)}>
+                {templates.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </select>
+            </div>
+          )}
         </div>
       )}
 
@@ -1820,7 +1884,7 @@ export default function IDE() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <button className="welcome-link" onClick={() => setShowProjectPicker(true)}><Plus size={16} /> New Project...</button>
                       <button className="welcome-link" onClick={openLocalFolder}><FolderOpen size={16} /> Open Folder...</button>
-                      <button className="welcome-link" onClick={() => window.open('https://github.com/new', '_blank')}><GitBranch size={16} /> Clone Git Repository...</button>
+                      <button className="welcome-link" onClick={cloneRepo}><GitBranch size={16} /> Clone Git Repository...</button>
                     </div>
 
                     <h2 style={{ fontSize: 13, textTransform: 'uppercase', color: '#ccc', marginTop: 32, marginBottom: 16 }}>Recent</h2>
@@ -2188,6 +2252,12 @@ export default function IDE() {
                                   original={(() => { const f = allFiles.find(x => relPath(x) === reviewFile); return f ? (openFiles[f.id]?.value ?? f.content) : ''; })()}
                                   modified={pendingAIAction.changes.writes.find(w => w.path === reviewFile)?.content || ''}
                                   language={getLang(reviewFile)}
+                                  // Keeping the models avoids Monaco's "TextModel got disposed before DiffEditorWidget
+                                  // model got reset" error on unmount; unique paths keep reviews from sharing stale models.
+                                  keepCurrentOriginalModel
+                                  keepCurrentModifiedModel
+                                  originalModelPath={`review-${reviewSeq}-a/${reviewFile}`}
+                                  modifiedModelPath={`review-${reviewSeq}-b/${reviewFile}`}
                                   theme="vs-dark"
                                   options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: false, fontSize: 12 }}
                                 />

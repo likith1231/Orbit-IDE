@@ -515,3 +515,11 @@ body, #root { margin: 0 !important; height: 100vh; width: 100% !important; max-w
 .diff-line.add { background: rgba(46,160,67,0.18); color: #9be9a8; }
 .diff-line.del { background: rgba(248,81,73,0.18); color: #ffa198; }
 .diff-line.hunk { color: #79c0ff; }
+
+/* ───────── Backend status banner ───────── */
+.backend-banner { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 14px; font-size: 12px; color: #fff; }
+.backend-banner.error { background: #8b1d1d; }
+.backend-banner.warn { background: #7a5b0f; }
+.backend-banner code { background: rgba(0,0,0,0.3); padding: 1px 5px; border-radius: 3px; font-family: var(--code-font); }
+.project-template-row { display: flex; align-items: center; gap: 8px; padding: 0 12px 10px; font-size: 11px; color: var(--vscode-text-dim); }
+.project-template-row select { flex: 1; }

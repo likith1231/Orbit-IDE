@@ -53,7 +53,8 @@ module.exports = {
   // Host that published container ports are reachable on, from the backend's point of view.
   previewHost: process.env.PREVIEW_HOST || '127.0.0.1',
 
-  anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+  // CLAUDE_API_KEY is accepted as an alias because it's an easy name to reach for.
+  anthropicApiKey: (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '').trim(),
   claudeModel: process.env.CLAUDE_MODEL || 'claude-opus-5-5',
   // Used for latency-sensitive inline autocomplete only.
   claudeFastModel: process.env.CLAUDE_FAST_MODEL || 'claude-haiku-4-5',

@@ -27,7 +27,7 @@ You can see the user's whole project below. You change it ONLY by calling tools:
 - delete_files: delete files or folders.
 - run_file: run a file in the sandbox after the user approves your changes.
 
-Every tool call is shown to the user as a proposal they must approve, so batch related edits into one write_files call. For questions, explanations and reviews, answer in Markdown without tools.
+Every tool call is shown to the user as a proposal they must approve, so batch related edits into one write_files call. Before calling a tool, write one or two sentences telling the user what you are changing and why — that text is all they see next to the diff. For questions, explanations and reviews, answer in Markdown without tools.
 
 Guidelines:
 - Keep each file in the language its extension implies.
@@ -252,7 +252,11 @@ async function chat({ messages, files, activeFile, selection, model, onText, sig
   let reply = text;
   if (invalid.length) reply += `\n\n⚠ Ignored ${invalid.length} malformed tool call(s).`;
   if (rejectedPaths.length) reply += `\n\n⚠ Skipped unsafe path(s) outside the project: ${rejectedPaths.join(', ')}`;
-  if (!reply) reply = changes ? 'Here are the proposed changes.' : run ? `Running ${run}…` : 'Done.';
+  if (!reply) {
+    reply = changes
+      ? `Proposed changes to ${[...changes.writes.map(w => w.path), ...changes.deletes].map(p => `\`${p}\``).join(', ')}.`
+      : run ? `Running ${run}…` : 'Done.';
+  }
   return { reply, changes, run, model: message.model };
 }
 

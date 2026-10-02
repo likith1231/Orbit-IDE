@@ -11,6 +11,7 @@ const { docker, ensureImage, listeningPorts, publishedPorts, dockerAvailable } =
 const { previewPath } = require('../lib/preview');
 const { findProjectContainer } = require('../lib/terminal');
 const config = require('../config');
+const { templateRows, templateList } = require('../lib/templates');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -39,11 +40,40 @@ router.get('/', wrap(async (req, res) => {
     res.json({ projects });
 }));
 
+router.get('/templates', (req, res) => res.json({ templates: templateList() }));
+
 router.post('/', validate(projectSchema), wrap(async (req, res) => {
     const project = await prisma.project.create({
-        data: { name: req.body.name, userId: req.userId },
+        data: { name: req.body.name, userId: req.userId, files: { create: templateRows(req.body.template || 'blank') } },
         include: { files: true },
     });
+    res.json({ project });
+}));
+
+// Clone a public git repository (https) into a new project.
+router.post('/clone', wrap(async (req, res) => {
+    const url = String(req.body?.url || '').trim();
+    if (!/^https:\/\/[\w.-]+(:\d+)?\/[\w./~%-]+$/.test(url)) return res.status(400).json({ error: 'Enter an https:// git URL, e.g. https://github.com/user/repo' });
+    const name = (url.split('/').pop() || 'repo').replace(/\.git$/, '').slice(0, 100) || 'repo';
+    const project = await prisma.project.create({ data: { name, userId: req.userId } });
+    const dir = workspace.workspaceDir(project.id);
+    const result = await new Promise((resolve) => {
+        const git = spawn('git', ['clone', '--depth', '1', '--single-branch', '--', url, dir], {
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, // never hang asking for credentials
+            timeout: 120000,
+        });
+        let err = '';
+        git.stderr.on('data', d => { err += d; });
+        git.on('close', code => resolve({ code, err }));
+        git.on('error', e => resolve({ code: 1, err: e.message }));
+    });
+    if (result.code !== 0) {
+        await prisma.project.delete({ where: { id: project.id } }).catch(() => {});
+        await workspace.removeEntry(project.id, '');
+        const msg = /not found|could not read|Authentication/i.test(result.err) ? 'Repository not found or private (only public repos can be cloned).' : result.err.trim().split('\n').pop();
+        return res.status(400).json({ error: `Clone failed: ${msg}` });
+    }
+    await workspace.importFromDisk(project.id);
     res.json({ project });
 }));
 
