@@ -146,12 +146,12 @@ server.on('upgrade', async (req, socket, head) => {
 });
 
 if (require.main === module) {
-  server.listen(config.port, async () => {
+  server.listen(config.port, config.host, async () => {
     const [dockerOk, terminal] = await Promise.all([dockerAvailable(), resolveMode()]);
-    console.log(`🚀 Orbit IDE backend on http://localhost:${config.port}`);
+    console.log(`🚀 Orbit IDE backend on http://${config.host}:${config.port}`);
     console.log(`🤖 AI: ${ai.enabled() ? `Claude (${config.claudeModel})` : 'disabled — set ANTHROPIC_API_KEY'}`);
     console.log(`🐳 Docker: ${dockerOk ? 'connected' : 'not available'} · 🖥  Terminal: ${terminal}`);
-    console.log(`🌐 CORS origins: ${config.corsOrigins.join(', ')}`);
+    console.log(`🌐 CORS origins: ${config.corsOrigins.join(', ')}${config.signupEnabled ? '' : ' · signups disabled'}`);
     cleanupStaleContainers().catch(() => {});
   });
 

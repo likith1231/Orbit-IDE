@@ -1,133 +1,82 @@
-# AI Cloud IDE
+# Orbit IDE
 
-A modern, cloud-based IDE built with React, Vite, Express, and Prisma. Features include multi-language container execution, AI assistance, and chaos engineering testing.
+A cloud IDE in the browser: Monaco editor, real terminals, multi-language code execution in Docker sandboxes, live app previews, git, real-time collaboration, chaos testing, and a Claude-powered AI pair-programmer that can edit your whole project.
 
-## Getting Started
+**Stack:** React + Vite (frontend, deployable to Vercel) · Express + Socket.IO + Prisma/Postgres (backend) · Docker (terminals and sandboxes) · Claude API (AI).
 
-Follow these instructions to get a copy of the project up and running on your local machine for development and testing purposes.
+## Features
 
-### Prerequisites
+- **Real terminal**: each project gets its own Linux container with your files at `/workspace`. Multiple tabs, split view, `npm install`, `pip install`, `git`, dev servers. Files you create in the terminal show up in the explorer automatically. No `node-pty` needed.
+- **Run any file** (Ctrl+Enter): JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Rust, Ruby, PHP, Bash, Perl, Lua, R, static HTML. Programs are interactive: type input in the **Run** tab. `package.json` / `requirements.txt` dependencies are installed automatically.
+- **Live preview**: servers listening on 3000/4200/5000/5173/8000/8080 open in a preview tab, proxied over HTTPS through the backend.
+- **Claude AI assistant**: sees every file in the project, streams answers, and proposes multi-file edits, deletions and runs that you review (with diffs) before anything changes. Editor actions: Ctrl+I to ask about a selection, explain, fix bugs, write tests, add docs. Inline autocomplete.
+- **Auto-debug**: when a run fails, Claude reads the real error output and proposes a fix.
+- **Source control**: commit, history, per-file diffs (same repo as `git` in the terminal).
+- **Collaboration**: open the same file in two browsers and edit together (Yjs).
+- **Chaos testing**: run your code under memory limits, CPU throttling, kills and network cuts and get a resilience score.
+- **One-click deploy**: keep a project running in a container with a shareable URL.
+- Search/replace across files, command palette (Ctrl+Shift+P), go to line, project download (.tar.gz), chat history.
 
-You will need the following installed on your machine:
-- **Node.js**: v18 or newer
-- **PostgreSQL**: Running locally or accessible via URL
-- **Docker**: Must be installed and running. The backend requires access to the Docker socket (`/var/run/docker.sock`) to spawn execution containers.
+## Local development
 
-### Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd ai-cloud-ide
-   ```
-
-2. **Install Backend Dependencies:**
-   ```bash
-   cd backend
-   npm install
-   ```
-
-3. **Install Frontend Dependencies:**
-   ```bash
-   cd ../frontend
-   npm install
-   ```
-
-### Configuration
-
-1. **Setup Environment Variables:**
-   Navigate to the `backend` directory and copy the example environment file:
-   ```bash
-   cd backend
-   cp .env.example .env
-   ```
-   Open the new `.env` file and fill in the required values (e.g., your PostgreSQL database URL, JWT secret, and Gemini API key).
-
-2. **Run Prisma Migrations:**
-   With your `DATABASE_URL` configured, initialize the database schema:
-   ```bash
-   npx prisma migrate dev --name init
-   ```
-
-### Docker Images
-
-The sandbox execution engine relies on several Docker images. While they will download automatically on first use, you can pull them ahead of time to avoid execution delays.
+**Prerequisites:** Node.js 20+, PostgreSQL, Docker (running).
 
 ```bash
-docker pull node:20-alpine
-docker pull python:3.12-alpine
-docker pull eclipse-temurin:21-jdk-alpine
-docker pull gcc:13-bookworm
-docker pull mcr.microsoft.com/dotnet/sdk:8.0-alpine
-docker pull golang:1.22-alpine
-docker pull rust:1.78-slim
-docker pull ruby:3.3-alpine
-docker pull php:8.3-cli-alpine
-docker pull bash:5.2-alpine
-docker pull perl:5.38-slim
-docker pull akorn/lua:5.4-alpine
-docker pull r-base:4.3.3
+# Backend
+cd backend
+npm install
+cp .env.example .env          # set DATABASE_URL, JWT_SECRET, ANTHROPIC_API_KEY
+npx prisma migrate deploy
+npm start                     # http://localhost:5000
+
+# Build the terminal image once (node + python + git + build tools).
+# Optional: without it terminals fall back to node:20-bookworm-slim.
+docker build -t orbit-terminal:latest -f docker/terminal.Dockerfile docker
+
+# Frontend (new terminal)
+cd frontend
+npm install
+npm run dev                   # http://localhost:5173
 ```
 
-### Running the Application
+Set `VITE_API_URL` in `frontend/.env.local` if the backend isn't at `http://localhost:5000`.
 
-1. **Start the Backend:**
-   In the `backend` directory, start the Express server:
-   ```bash
-   npm start
-   ```
+### Terminal modes
 
-2. **Start the Frontend:**
-   In a new terminal window, navigate to the `frontend` directory and start the Vite dev server:
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-   The IDE should now be accessible at `http://localhost:5173`.
+`TERMINAL_MODE` in `backend/.env`:
+
+| Mode | What it does |
+|---|---|
+| `auto` (default) | `docker` if Docker is reachable; otherwise `local` in development and `off` in production |
+| `docker` | One container per project, a `docker exec` TTY per tab. Isolated from the host. Use this on servers. |
+| `local` | Shell on your own machine in the project's folder (`backend/data/workspaces/<id>`). Uses `node-pty` if it installed (optional dependency), else `script`, else a basic line-mode fallback (works on Windows without build tools). |
+| `off` | Disabled |
+
+### AI configuration
+
+Set `ANTHROPIC_API_KEY` in `backend/.env`. `CLAUDE_MODEL` picks the default chat model (`claude-opus-5-5`; users can switch to Sonnet 5.5 or Haiku 4.5 in the chat panel). Inline autocomplete uses `CLAUDE_FAST_MODEL` (`claude-haiku-4-5`) because it runs on every typing pause.
+
+## Deploying
+
+- **Backend → Oracle Cloud (Always Free):** follow [docs/DEPLOY_ORACLE.md](docs/DEPLOY_ORACLE.md). It's one VM running `docker compose` with Postgres and automatic HTTPS via Caddy.
+- **Frontend → Vercel:** set `VITE_API_URL=https://<your-backend-domain>` and redeploy.
+
+The backend needs a Docker host, so it can't run on serverless platforms (Vercel functions, Lambda, etc.).
 
 ## Testing
 
-The project has comprehensive testing at both the API level and End-to-End.
+```bash
+cd backend && npm test             # Jest + Supertest (uses TEST_DATABASE_URL)
+cd frontend && npm run test:e2e    # Playwright (backend and frontend must be running)
+```
 
-### Unit & Integration Tests (Backend)
-Backend tests are built with Jest and Supertest, running against a dedicated test database to ensure isolation.
+## Limits
 
-1. Configure your `.env` in the `backend` directory, making sure `TEST_DATABASE_URL` is set to a separate test database.
-2. Ensure the test database exists in PostgreSQL.
-3. Run the tests:
-   ```bash
-   cd backend
-   npm test
-   ```
+Per IP: auth 20 / 15 min, code execution 40 / min, general API 2000 / 15 min. Per user: AI chat 60 / 15 min, auto-debug 30 / 15 min. Sandboxes get 512 MB RAM, 1 CPU and a 10 minute limit. Terminals get 1 GB RAM (`TERMINAL_MEMORY_MB`) and stop after 20 idle minutes (`TERMINAL_IDLE_MINUTES`); files are kept.
 
-### End-to-End Tests (Frontend)
-End-to-End tests are built with Playwright, testing the full critical path including signup, code execution, AI assistance, and file persistence.
+## Security notes
 
-1. Ensure your backend is running (`cd backend && npm start`).
-2. Ensure your frontend is running (`cd frontend && npm run dev`).
-3. Run the Playwright test suite:
-   ```bash
-   cd frontend
-   npm run test:e2e
-   ```
-   To run in UI mode for debugging:
-   ```bash
-   cd frontend
-   npx playwright test --ui
-   ```
-
-## Rate Limits
-
-To protect against abuse and brute-force attacks, the backend API enforces several rate limits per IP address:
-
-- **Authentication (`/api/auth/login`, `/api/auth/signup`)**: 5 requests per 15 minutes.
-- **Docker Execution (`/api/run`, `/api/chaos`, `/api/containers`)**: 10 requests per minute.
-- **General API**: 100 requests per 15 minutes.
-
-If a limit is exceeded, the server will return a 429 status code with a JSON error message and a `Retry-After` header. This is expected behavior during heavy usage.
-
-## Known Limitations
-
-- **Docker Socket Requirement**: The backend heavily relies on mounting `/var/run/docker.sock` to orchestrate sandbox containers. This application cannot be deployed as-is to serverless environments (like Vercel or AWS Lambda) or locked-down PaaS platforms without modifying the execution strategy.
-- **Network Access in Sandbox**: Some language runtimes (e.g., C# with `dotnet run` or TypeScript with `npx tsx`) currently require network access inside the Docker sandbox to fetch packages or run execution frameworks.
-- **Cold Start Delays**: The very first code execution for a specific language will be significantly slower as the server pulls the necessary Docker image from Docker Hub. Pulling the images ahead of time mitigates this.
+- Every API route, socket and collaboration channel requires a login, and users can only reach their own projects, chats and containers.
+- User code runs in containers with memory, CPU and process limits and `no-new-privileges`. Ports are published on `127.0.0.1` only and reached through the authenticated preview proxy.
+- In production, run the backend on `127.0.0.1` behind the proxy (the compose file does this) and set `SIGNUP_ENABLED=false` once your account exists.
+- Containers share the host kernel. For untrusted public users, add a stronger sandbox runtime such as gVisor (`runsc`).

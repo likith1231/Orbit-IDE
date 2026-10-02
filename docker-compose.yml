@@ -1,0 +1,74 @@
+# Production stack for a single VM (e.g. Oracle Cloud Always Free).
+# See docs/DEPLOY_ORACLE.md. Configure via a .env file next to this one:
+#   DOMAIN, POSTGRES_PASSWORD, JWT_SECRET, ANTHROPIC_API_KEY, CORS_ORIGINS
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orbit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: orbit
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432" # localhost only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbit"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    # Host networking lets the backend reach container ports published on 127.0.0.1
+    # (app previews) and Postgres, while it listens on 127.0.0.1 only (Caddy is the front door).
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      HOST: 127.0.0.1
+      PORT: 5000
+      DATABASE_URL: postgresql://orbit:${POSTGRES_PASSWORD}@127.0.0.1:5432/orbit
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5-5}
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env}
+      SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
+      DOCKER_IMAGE_MIRROR: ${DOCKER_IMAGE_MIRROR:-}
+      TERMINAL_MODE: docker
+      TERMINAL_IMAGE: orbit-terminal:latest
+      # Must be the same path on the host and in this container: sibling containers
+      # (terminals, sandboxes) bind-mount these directories from the host.
+      DATA_DIR: /var/lib/orbit
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/orbit:/var/lib/orbit
+
+  # Builds the image used for in-browser terminals, then exits.
+  terminal-image:
+    build:
+      context: ./docker
+      dockerfile: terminal.Dockerfile
+    image: orbit-terminal:latest
+    entrypoint: ["true"]
+    restart: "no"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

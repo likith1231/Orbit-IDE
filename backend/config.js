@@ -20,6 +20,11 @@ module.exports = {
   isProd,
   isTest,
   port: Number(process.env.PORT) || 5000,
+  // Bind address. Use 127.0.0.1 behind a reverse proxy so the API (and anything user code
+  // could reach on the host) isn't exposed directly.
+  host: process.env.HOST || '0.0.0.0',
+  // Set to "false" once your own account exists to stop strangers using your server and API key.
+  signupEnabled: process.env.SIGNUP_ENABLED !== 'false',
   jwtSecret: process.env.JWT_SECRET,
   corsOrigins: list(process.env.CORS_ORIGINS, ['http://localhost:5173', 'https://orbit-ide-rho.vercel.app']),
 

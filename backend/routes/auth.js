@@ -19,6 +19,7 @@ const authLimiter = rateLimit({
 });
 
 router.post('/signup', authLimiter, validate(signupSchema), async (req, res) => {
+    if (!config.signupEnabled) return res.status(403).json({ error: 'Sign-ups are closed on this server.' });
     const { email, password, name } = req.body;
     try {
         const existing = await prisma.user.findUnique({ where: { email } });

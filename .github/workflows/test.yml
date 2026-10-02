@@ -4,15 +4,13 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
-    
     services:
       postgres:
-        image: postgres:15
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgrespassword
@@ -24,31 +22,44 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
+    env:
+      DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/ai_cloud_ide_test"
+      TEST_DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/ai_cloud_ide_test"
+      JWT_SECRET: "test_jwt_secret"
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Use Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        cache: 'npm'
-        cache-dependency-path: backend/package-lock.json
-        
-    - name: Install Dependencies
-      working-directory: ./backend
-      run: npm install
-      
-    - name: Push Prisma Schema
-      working-directory: ./backend
-      env:
-        DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/ai_cloud_ide_test"
-      run: npx prisma db push
-      
-    - name: Run Tests
-      working-directory: ./backend
-      env:
-        NODE_ENV: test
-        TEST_DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/ai_cloud_ide_test"
-        JWT_SECRET: "test_jwt_secret"
-      run: npm test
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - name: Install
+        working-directory: ./backend
+        run: npm ci
+      - name: Apply migrations
+        working-directory: ./backend
+        run: npx prisma migrate deploy
+      - name: Test
+        working-directory: ./backend
+        env:
+          NODE_ENV: test
+        run: npm test
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        working-directory: ./frontend
+        run: npm ci
+      - name: Typecheck
+        working-directory: ./frontend
+        run: npx tsc --noEmit -p .
+      - name: Build
+        working-directory: ./frontend
+        run: npm run build

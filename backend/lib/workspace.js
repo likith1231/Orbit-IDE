@@ -130,58 +130,64 @@ const splitRel = (rel) => {
 };
 
 // Bring changes made on disk (e.g. from the terminal) into the database.
+//
+// The editor writes to the database first and the disk second, so "disk differs from DB"
+// does NOT mean the disk is newer. Rules that keep the editor from losing edits:
+//   - `changedPaths`: only look at files whose mtime changed since the last scan (null = all,
+//     used by the manual "sync" button).
+//   - Never overwrite a DB row that was updated after the file's mtime (last writer wins).
+//   - Only delete rows for `removedPaths` (files that existed on the previous scan and are gone
+//     now), or, for a full import, rows that are missing on disk and not recently touched.
 // Returns true if anything changed.
-async function importFromDisk(projectId, { removeMissing = true } = {}) {
+async function importFromDisk(projectId, { changedPaths = null, removedPaths = null } = {}) {
   const dir = workspaceDir(projectId);
   if (!fs.existsSync(dir)) return false;
   const { files, folders } = await walk(dir);
   const existing = await prisma.file.findMany({ where: { projectId } });
   const byRel = new Map(existing.map(f => [joinRel(f.path, f.name), f]));
+  const wanted = (rel) => !changedPaths || changedPaths.has(rel);
   let changed = false;
 
   for (const rel of folders) {
-    if (byRel.has(rel)) continue;
+    if (byRel.has(rel) || !wanted(rel + '/')) continue;
     const { path: p, name } = splitRel(rel);
     await prisma.file.create({ data: { projectId, path: p, name, isFolder: true, language: '', content: '' } })
       .then(() => { changed = true; }).catch(() => {});
   }
 
   for (const f of files) {
+    if (!wanted(f.rel)) continue;
+    const row = byRel.get(f.rel);
+    if (row?.isFolder) continue;
+    if (row && row.updatedAt.getTime() >= f.mtimeMs) continue; // the editor saved more recently
     const buf = await fsp.readFile(path.join(dir, f.rel)).catch(() => null);
     if (!buf || isBinary(buf)) continue;
     const content = buf.toString('utf8');
-    const row = byRel.get(f.rel);
-    if (row && !row.isFolder) {
-      if (row.content !== content) {
-        await prisma.file.update({ where: { id: row.id }, data: { content } });
-        updateLiveDoc(projectId, row.id, content);
-        changed = true;
-      }
-    } else if (!row) {
+    if (row) {
+      if (row.content === content) continue;
+      // Conditional update: skip if the editor saved in the meantime.
+      const res = await prisma.file.updateMany({ where: { id: row.id, updatedAt: row.updatedAt }, data: { content } });
+      if (res.count) { updateLiveDoc(projectId, row.id, content); changed = true; }
+    } else {
       const { path: p, name } = splitRel(f.rel);
       await prisma.file.create({ data: { projectId, path: p, name, isFolder: false, language: languageFor(name), content } })
         .then(() => { changed = true; }).catch(() => {});
     }
   }
 
-  if (removeMissing) {
-    const onDisk = new Set([...files.map(f => f.rel), ...folders]);
-    const recent = Date.now() - 15000;
-    const stale = existing.filter(f => {
-      // Skip rows touched in the last few seconds: the editor may have created them
-      // after our directory walk but before they were written to disk.
-      if (f.updatedAt.getTime() > recent) return false;
-      const rel = joinRel(f.path, f.name);
-      if (onDisk.has(rel)) return false;
-      // Don't delete things we deliberately skip (ignored dirs, oversized/binary files).
-      const top = rel.split('/');
-      if (top.some(seg => IGNORED_DIRS.has(seg))) return false;
-      return !fs.existsSync(path.join(dir, rel));
-    });
-    if (stale.length) {
-      await prisma.file.deleteMany({ where: { id: { in: stale.map(f => f.id) } } });
-      changed = true;
-    }
+  const onDisk = new Set([...files.map(f => f.rel), ...folders]);
+  const recent = Date.now() - 15000;
+  const stale = existing.filter(f => {
+    const rel = joinRel(f.path, f.name);
+    if (onDisk.has(rel)) return false;
+    if (removedPaths ? !removedPaths.has(f.isFolder ? rel + '/' : rel) : f.updatedAt.getTime() > recent) return false;
+    // Don't delete things we deliberately skip (ignored dirs, oversized/binary files).
+    if (rel.split('/').some(seg => IGNORED_DIRS.has(seg))) return false;
+    return !fs.existsSync(path.join(dir, rel));
+  });
+  if (stale.length) {
+    await prisma.file.deleteMany({ where: { id: { in: stale.map(f => f.id) } } });
+    changed = true;
   }
 
   if (changed) await prisma.project.update({ where: { id: projectId }, data: { updatedAt: new Date() } }).catch(() => {});
@@ -195,26 +201,29 @@ const scanners = new Map(); // projectId -> { refs, timer, snapshot, onChange }
 function startScanner(projectId, onChange) {
   let s = scanners.get(projectId);
   if (s) { s.refs += 1; s.listeners.add(onChange); return; }
-  s = { refs: 1, snapshot: new Map(), listeners: new Set([onChange]), busy: false };
-  s.timer = setInterval(async () => {
+  s = { refs: 1, snapshot: null, listeners: new Set([onChange]), busy: false };
+  const tick = async () => {
     if (s.busy) return;
     s.busy = true;
     try {
       const { files, folders } = await walk(workspaceDir(projectId));
       const sig = new Map(files.map(f => [f.rel, `${f.mtimeMs}:${f.size}`]));
       folders.forEach(d => sig.set(d + '/', 'dir'));
-      let dirty = sig.size !== s.snapshot.size;
-      if (!dirty) for (const [k, v] of sig) if (s.snapshot.get(k) !== v) { dirty = true; break; }
+      const previous = s.snapshot;
       s.snapshot = sig;
-      // importFromDisk only writes rows whose content actually differs, so the first
-      // (always "dirty") pass is cheap and catches anything created before we started.
-      if (dirty && await importFromDisk(projectId)) s.listeners.forEach(fn => fn());
+      if (!previous) return; // first pass only records the baseline
+      const changedPaths = new Set([...sig].filter(([k, v]) => previous.get(k) !== v).map(([k]) => k));
+      const removedPaths = new Set([...previous.keys()].filter(k => !sig.has(k)));
+      if (!changedPaths.size && !removedPaths.size) return;
+      if (await importFromDisk(projectId, { changedPaths, removedPaths })) s.listeners.forEach(fn => fn());
     } catch (e) {
       console.error('workspace scan failed:', e.message);
     } finally {
       s.busy = false;
     }
-  }, 2500);
+  };
+  tick(); // baseline right away, so changes made in the first seconds aren't missed
+  s.timer = setInterval(tick, 2500);
   scanners.set(projectId, s);
 }
 
