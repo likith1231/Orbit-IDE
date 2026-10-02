@@ -4,14 +4,15 @@ const jwt = require('jsonwebtoken');
 const prisma = require('../db');
 
 const validate = require('../middleware/validate');
-const { signupSchema } = require('../schemas');
+const { signupSchema, loginSchema } = require('../schemas');
+const config = require('../config');
 
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: process.env.NODE_ENV === 'test' ? 1000 : 5, // Limit each IP to 5 auth requests per windowMs
+    max: process.env.NODE_ENV === 'test' ? 1000 : 20, // auth attempts per IP per window
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many attempts, please try again in 15 minutes' }
@@ -35,13 +36,14 @@ router.post('/signup', authLimiter, validate(signupSchema), async (req, res) => 
                 userId: user.id,
                 files: {
                     create: [
-                        { name: 'README.md', language: 'markdown', content: '# New Project\n' },
+                        { name: 'README.md', language: 'markdown', content: '# My first Orbit project\n\n- Press **Ctrl+Enter** to run the active file.\n- Open the terminal with **Ctrl+`** — it runs in your own container.\n- Ask the AI assistant (bottom-right) to build something.\n' },
+                        { name: 'main.py', language: 'python', content: 'name = input("What is your name? ")\nprint(f"Hello, {name}! Welcome to Orbit IDE.")\n' },
                     ],
                 },
             },
         });
 
-        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ userId: user.id }, config.jwtSecret, { expiresIn: '7d' });
         res.json({ token, user: { id: user.id, email: user.email, name: user.name } });
     } catch (err) {
         console.error(err);
@@ -49,7 +51,7 @@ router.post('/signup', authLimiter, validate(signupSchema), async (req, res) => 
     }
 });
 
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', authLimiter, validate(loginSchema), async (req, res) => {
     const { email, password } = req.body;
     try {
         const user = await prisma.user.findUnique({ where: { email } });
@@ -58,7 +60,7 @@ router.post('/login', authLimiter, async (req, res) => {
         const match = await bcrypt.compare(password, user.password);
         if (!match) return res.status(401).json({ error: 'Invalid email or password.' });
 
-        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ userId: user.id }, config.jwtSecret, { expiresIn: '7d' });
         res.json({ token, user: { id: user.id, email: user.email, name: user.name } });
     } catch (err) {
         console.error(err);
@@ -71,6 +73,7 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
         where: { id: req.userId },
         select: { id: true, email: true, name: true },
     });
+    if (!user) return res.status(401).json({ error: 'Account no longer exists.' });
     res.json({ user });
 });
 

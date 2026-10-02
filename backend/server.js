@@ -1,59 +1,57 @@
-require('dotenv').config();
+const config = require('./config');
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
-const pty = require('node-pty');
-const os = require('os');
-const Docker = require('dockerode');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const WebSocket = require('ws');
 const rateLimit = require('express-rate-limit');
-const validate = require('./middleware/validate');
-const { aiChatSchema, codeExecutionSchema } = require('./schemas');
+const { setupWSConnection } = require('y-websocket/bin/utils');
+const prisma = require('./db');
 
+const authMiddleware = require('./middleware/auth');
+const { verifyToken } = authMiddleware;
 const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
-
 const chatRoutes = require('./routes/chats');
 const runRoutes = require('./routes/run');
 const chaosRoutes = require('./routes/chaos');
 const gitRoutes = require('./routes/git');
+const aiRoutes = require('./routes/ai');
+const ai = require('./lib/ai');
+const { docker, dockerAvailable } = require('./lib/docker');
+const { attachTerminals, cleanupStaleContainers, resolveMode } = require('./lib/terminal');
+const { previewMiddleware, handlePreviewUpgrade } = require('./lib/preview');
 
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const corsOptions = {
-  origin: ['https://orbit-ide-rho.vercel.app', 'http://localhost:5173'],
+  origin: config.corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-  credentials: true
+  credentials: true,
 };
 
-const io = new Server(server, { 
-  cors: corsOptions 
-});
-app.set('io', io);
+// App previews are proxied before anything else so their requests aren't touched by our middleware.
+app.use(previewMiddleware);
 
 app.use(cors(corsOptions));
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '25mb' }));
 
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many requests, please try again later' }
+const limiter = (max, windowMs, error) => rateLimit({
+  windowMs, max, standardHeaders: true, legacyHeaders: false, message: { error },
 });
+const generalLimiter = limiter(2000, 15 * 60 * 1000, 'Too many requests, please try again later');
+const dockerLimiter = limiter(40, 60 * 1000, 'Too many execution requests, please try again in a minute');
 
-const dockerLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many execution requests, please try again in a minute' }
+app.get('/api/health', async (req, res) => {
+  const [db, dockerOk, terminal] = await Promise.all([
+    prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false),
+    dockerAvailable(),
+    resolveMode(),
+  ]);
+  res.status(db ? 200 : 503).json({ ok: db, db, docker: dockerOk, terminal, ai: ai.enabled() });
 });
 
 app.use('/api/auth', authRoutes);
@@ -61,285 +59,109 @@ app.use('/api/projects', generalLimiter, projectRoutes);
 app.use('/api/projects/:projectId/git', generalLimiter, gitRoutes);
 app.use('/api/projects/:projectId/chats', generalLimiter, chatRoutes);
 app.use('/api/chats', generalLimiter, chatRoutes);
-
+app.use('/api/ai', generalLimiter, aiRoutes);
 app.use('/api/run', dockerLimiter, runRoutes);
 app.use('/api/chaos', dockerLimiter, chaosRoutes);
-app.use('/api/containers', dockerLimiter);
 
-app.get('/api/containers/list', async (req, res) => {
+// Containers panel: only ever shows / controls the current user's own containers.
+const containers = express.Router();
+containers.use(authMiddleware);
+containers.get('/list', async (req, res) => {
   try {
-    const containers = await docker.listContainers({ all: true });
-    res.json({ containers });
-  } catch (err) { res.status(500).json({ error: 'Failed to list containers.' }); }
+    const list = await docker.listContainers({ all: true, filters: { label: [`orbit.user=${req.userId}`] } });
+    res.json({ containers: list.map(c => ({ Id: c.Id, Names: c.Names, State: c.State, Status: c.Status, Image: c.Image, Kind: c.Labels['orbit.kind'] })) });
+  } catch {
+    res.status(503).json({ error: 'Docker is not available.', containers: [] });
+  }
 });
-
-app.post('/api/containers/:id/start', async (req, res) => {
-  try {
-    const container = docker.getContainer(req.params.id);
-    await container.start();
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message || 'Failed to start container.' }); }
-});
-
-app.post('/api/containers/:id/stop', async (req, res) => {
+containers.post('/:id/:action', async (req, res) => {
+  if (!['start', 'stop'].includes(req.params.action)) return res.status(404).json({ error: 'Unknown action' });
   try {
     const container = docker.getContainer(req.params.id);
-    await container.stop();
+    const info = await container.inspect().catch(() => null);
+    if (!info || info.Config.Labels?.['orbit.user'] !== req.userId) return res.status(404).json({ error: 'Container not found.' });
+    if (req.params.action === 'start') await container.start();
+    else await container.stop({ t: 2 });
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message || 'Failed to stop container.' }); }
-});
-
-const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
-
-app.post('/api/ai/chat', generalLimiter, validate(aiChatSchema), async (req, res) => {
-  const { messages, fileTree, activeFile, model } = req.body;
-
-  const treeListing = (fileTree || [])
-    .map(f => `${f.isFolder ? '[folder]' : '[file]'} ${f.path ? f.path + '/' : ''}${f.name}`)
-    .join('\n');
-
-  const systemPrompt = `You are an expert AI coding agent embedded in a web IDE, like GitHub Copilot or Cursor — but more capable: you can create entire multi-file projects in one response, not just edit one file.
-
-PROJECT STRUCTURE:
-${treeListing || '(empty project)'}
-
-ACTIVE FILE: ${activeFile ? (activeFile.path ? activeFile.path + '/' : '') + activeFile.name : 'none'}
-${activeFile ? `ACTIVE FILE CONTENT:\n${activeFile.content}` : ''}
-
-RESPONSE FORMAT — choose exactly ONE of these four modes:
-
-MODE 1 — Multi-file Edit / Scaffold (use when asked to create, set up, OR update multiple files at once, e.g., HTML + CSS + JS):
-Respond with ONLY a JSON object, nothing else, no markdown fences:
-{"mode":"scaffold","reply":"one line summary of work done","items":[{"name":"server.js","path":"","isFolder":false,"language":"javascript","content":"...full file content..."},{"name":"routes","path":"","isFolder":true},{"name":"users.js","path":"routes","isFolder":false,"language":"javascript","content":"..."}]}
-
-MODE 2 — Single File Edit (use ONLY for fixing or updating exactly ONE file, the currently active file):
-Respond with a brief summary of the work done, followed by a single markdown code block containing the COMPLETE updated file content.
-
-MODE 3 — Run a file or answer a question:
-For run requests, respond with exactly: RUN_FILE:<filename>
-For questions, answer concisely in plain text using the real context above.
-
-MODE 4 — Delete file(s):
-Respond with ONLY a JSON object, nothing else, no markdown fences:
-{"mode":"delete","reply":"summary of deletion","items":["filename1.js", "path/folder2"]}
-
-RULES:
-- Match file extensions to file content language exactly (.js=JavaScript only, .py=Python only, etc.)
-- NEVER fabricate output or claim you executed code.
-- For scaffolding, YOU MUST OUTPUT THE ENTIRE WORKING SOURCE CODE FOR EVERY FILE in the "content" field. DO NOT leave the "content" field empty. NO STUBS.
-- For scaffolding, IMPORTANT: "name" must ONLY be the filename (e.g., "index.html"). Do NOT include the folder path in "name". Put the folder in "path" (e.g., "public").
-- DO NOT suggest running 'npm install'. To add dependencies, use MODE 1 to scaffold a 'package.json' file.
-- CRITICAL: If you are creating or updating multiple files, you MUST output them as separate entities (either via MODE 1 JSON, or as SEPARATE markdown code blocks). NEVER combine multiple files (like HTML, CSS, JS) into a single code block.
-- If using markdown code blocks, ALWAYS include the exact filename on the very first line of the code block as a comment (e.g. `// style.css` or `<!-- index.html -->`).`;
-
-
-  let historyRaw = (messages || []).slice(0, -1);
-  const firstUserIndex = historyRaw.findIndex(m => m.role === 'user');
-  historyRaw = firstUserIndex >= 0 ? historyRaw.slice(firstUserIndex) : [];
-  const history = historyRaw.map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] }));
-  const lastUserMessage = messages?.[messages.length - 1]?.content || '';
-
-  function parseReply(reply) {
-    const trimmed = reply.trim();
-    if (trimmed.startsWith('RUN_FILE:')) {
-      return { reply: 'Running...', action: 'run', fileName: trimmed.replace('RUN_FILE:', '').trim() };
-    }
-    
-    let jsonMatch = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-    let jsonStr = jsonMatch ? jsonMatch[1] : trimmed;
-    
-    // Try to parse scaffold JSON
-    if (jsonStr.includes('"mode"') && jsonStr.includes('"scaffold"')) {
-       try {
-         const firstBrace = jsonStr.indexOf('{');
-         const lastBrace = jsonStr.lastIndexOf('}');
-         if (firstBrace !== -1 && lastBrace > firstBrace) {
-           const parsed = JSON.parse(jsonStr.substring(firstBrace, lastBrace + 1));
-           if (parsed.mode === 'scaffold' && Array.isArray(parsed.items)) {
-             return { reply: parsed.reply || 'Scaffolding project...', action: 'scaffold', items: parsed.items };
-           }
-         }
-       } catch (e) {}
-    }
-
-    // Try delete
-    if (jsonStr.includes('"mode"') && jsonStr.includes('"delete"')) {
-      try {
-         const firstBrace = jsonStr.indexOf('{');
-         const lastBrace = jsonStr.lastIndexOf('}');
-         if (firstBrace !== -1 && lastBrace > firstBrace) {
-           const parsed = JSON.parse(jsonStr.substring(firstBrace, lastBrace + 1));
-           if (parsed.mode === 'delete' && Array.isArray(parsed.items)) {
-             return { reply: parsed.reply || 'Deleting files...', action: 'delete', items: parsed.items };
-           }
-         }
-      } catch (e) {}
-    }
-
-    const codeBlocks = [...reply.matchAll(/```(\w+)?\n([\s\S]*?)```/g)];
-    if (codeBlocks.length > 1) {
-      const items = codeBlocks.map((match) => {
-         const lang = match[1] || 'text';
-         let code = match[2];
-         let name = '';
-         
-         const beforeBlock = reply.substring(0, match.index).trim();
-         const linesBefore = beforeBlock.split('\n');
-         const lastLineBefore = linesBefore[linesBefore.length - 1].trim();
-         const nameMatch = lastLineBefore.match(/`?([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)`?/);
-         
-         if (nameMatch) {
-            name = nameMatch[1];
-         } else {
-            const firstLine = code.split('\n')[0].trim();
-            if (firstLine.startsWith('//') || firstLine.startsWith('/*') || firstLine.startsWith('<!--')) {
-               const potentialName = firstLine.replace(/[\/\\*<!>\-]/g, '').trim();
-               if (potentialName && potentialName.includes('.')) {
-                   name = potentialName.split(' ')[0];
-                   code = code.substring(code.indexOf('\n') + 1);
-               }
-            }
-         }
-         
-         if (!name) name = `file_${Math.random().toString(36).slice(2,8)}.${lang === 'javascript' ? 'js' : lang}`;
-         return { name, path: '', isFolder: false, language: lang, content: code.trim() };
-      });
-      return { reply: 'Extracted multiple files...', action: 'scaffold', items };
-    } else if (codeBlocks.length === 1) {
-      return { reply: reply.replace(/```[\s\S]*?```/, '').trim() || 'Applying changes...', action: 'apply', code: codeBlocks[0][2].trim(), fileName: activeFile?.name };
-    }
-
-    return { reply };
-  }
-
-  const selectedModel = model || 'gemini-flash-lite-latest';
-
-  if (genAI && selectedModel.startsWith('gemini')) {
-    try {
-      const genModel = genAI.getGenerativeModel({ model: selectedModel, systemInstruction: systemPrompt });
-      const chat = genModel.startChat({ history });
-      const result = await chat.sendMessage(lastUserMessage);
-      return res.json(parseReply(result.response.text()));
-    } catch (err) { console.error('Gemini API error:', err.message); }
-  }
-
-  try {
-    const historyText = (messages || []).map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
-    const prompt = `${systemPrompt}\n\nCONVERSATION:\n${historyText}\n\nA:`;
-    const ollamaModel = selectedModel.startsWith('gemini') ? 'qwen2.5-coder:7b' : selectedModel;
-    const response = await axios.post('http://127.0.0.1:11434/api/generate', { model: ollamaModel, prompt, stream: false }, { timeout: 60000 });
-    return res.json(parseReply(response.data.response));
   } catch (err) {
-    return res.status(500).json({ error: 'No AI backend available.' });
+    res.status(500).json({ error: err.message || 'Container action failed.' });
   }
 });
+app.use('/api/containers', dockerLimiter, containers);
 
-// AI auto-debug: takes real stderr + code, returns a fix
-app.post('/api/ai/autocomplete', generalLimiter, async (req, res) => {
-  const { prefix, suffix, language } = req.body;
-  if (!prefix || !language) return res.json({ completion: '' });
-  
-  const systemPrompt = `You are a strict code autocomplete engine.
-You are given a PREFIX and a SUFFIX of a ${language} file. 
-You must output ONLY the code that belongs exactly between the PREFIX and SUFFIX.
-DO NOT wrap your response in markdown blocks. DO NOT output any explanations.`;
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
-  const prompt = `PREFIX:\n${prefix}\n\nSUFFIX:\n${suffix}`;
-  
-  try {
-    if (genAI) {
-      const model = genAI.getGenerativeModel({ model: 'gemini-flash-lite-latest', systemInstruction: systemPrompt });
-      const result = await model.generateContent(prompt);
-      return res.json({ completion: result.response.text().trim() });
-    }
-    return res.json({ completion: '' });
-  } catch (err) {
-    return res.json({ completion: '' });
-  }
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  if (res.headersSent) return;
+  res.status(err.status || 500).json({ error: config.isProd ? 'Internal server error' : err.message });
 });
 
-app.post('/api/ai/debug', generalLimiter, validate(codeExecutionSchema), async (req, res) => {
-  const { code, language, fileName, error: stderr } = req.body;
+// ───────────── realtime: socket.io (terminals, sandbox I/O) ─────────────
 
-  const prompt = `You are a coding agent. The user ran this ${language} code and got a real error from the sandbox. Fix it.
+const io = new Server(server, { cors: corsOptions, destroyUpgrade: false, maxHttpBufferSize: 1e6 });
+app.set('io', io);
 
-FILE: ${fileName}
-CODE:
-${code}
-
-REAL ERROR OUTPUT:
-${stderr}
-
-If the error is due to a missing package or dependency, you can respond with a MODE 1 scaffold JSON containing a \`package.json\` (or \`requirements.txt\`) with the needed dependencies.
-Otherwise, respond with ONLY a single markdown code block containing the COMPLETE fixed file. No explanation before the code block.`;
-
-  if (genAI) {
-    try {
-      const model = genAI.getGenerativeModel({ model: 'gemini-flash-lite-latest' });
-      const result = await model.generateContent(prompt);
-      const reply = result.response.text();
-      
-      const jsonMatch = reply.match(/\{[\s\S]*"mode"\s*:\s*"scaffold"[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          const parsed = JSON.parse(jsonMatch[0]);
-          return res.json({ scaffold: parsed.items, explanation: 'Scaffolding missing dependencies.' });
-        } catch {}
-      }
-      
-      const codeMatch = reply.match(/```(?:\w+)?\n([\s\S]*?)```/);
-      if (codeMatch) return res.json({ fixed: codeMatch[1].trim(), explanation: reply.replace(/```[\s\S]*?```/, '').trim() });
-      return res.json({ fixed: reply.trim() });
-    } catch (err) { console.error('Gemini debug error:', err.message); }
-  }
-
-  return res.status(500).json({ error: 'No AI backend available for auto-debug.' });
+io.use((socket, next) => {
+  const userId = verifyToken(socket.handshake.auth?.token);
+  if (!userId) return next(new Error('unauthorized'));
+  socket.data.userId = userId;
+  next();
 });
 
 io.on('connection', (socket) => {
-  let ptyProcess = null;
+  socket.join(`user:${socket.data.userId}`);
+  attachTerminals(io, socket);
+  runRoutes.attachSandboxIO(socket);
+});
 
-  const spawnShell = (preferredShell) => {
-    console.log('Spawning shell:', preferredShell);
-    if (ptyProcess) { ptyProcess.kill(); ptyProcess = null; }
+// ───────────── realtime: Yjs collaborative editing on /yjs/<room>?token= ─────────────
 
-    if (process.env.TERMINAL_ENABLED !== 'true') {
-      socket.emit('terminal-output', '\r\n\x1b[31mTerminal is disabled in this deployment for security reasons.\x1b[0m\r\n');
-      return;
+const yjs = new WebSocket.Server({ noServer: true });
+yjs.on('connection', (conn, req, docName) => setupWSConnection(conn, req, { docName }));
+
+server.on('upgrade', async (req, socket, head) => {
+  if (req.url.startsWith('/preview/')) {
+    if (!handlePreviewUpgrade(req, socket, head)) socket.destroy();
+    return;
+  }
+  if (!req.url.startsWith('/yjs/')) return; // socket.io handles its own path
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    const docName = decodeURIComponent(url.pathname.slice('/yjs/'.length));
+    const userId = verifyToken(url.searchParams.get('token'));
+    // Rooms are "<projectId>-<fileId>"; only the project's owner may join.
+    const projectId = docName.slice(0, 36);
+    const owns = userId && await prisma.project.findFirst({ where: { id: projectId, userId }, select: { id: true } });
+    const file = owns && await prisma.file.findFirst({ where: { id: docName.slice(37), projectId }, select: { id: true } });
+    if (!file) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      return socket.destroy();
     }
-
-    const shellMap = { bash: 'bash', zsh: 'zsh', sh: 'sh' };
-    const shell = os.platform() === 'win32'
-      ? 'powershell.exe'
-      : (shellMap[preferredShell] || 'bash');
-    ptyProcess = pty.spawn(shell, [], { name: 'xterm-color', cols: 80, rows: 24, cwd: process.env.HOME, env: process.env });
-    ptyProcess.onData((data) => { socket.emit('terminal-output', data); });
-    socket.emit('terminal-ready', { shell });
-  };
-
-  spawnShell('bash');
-  socket.on('terminal-input', (data) => { 
-    console.log('Received terminal input:', JSON.stringify(data));
-    ptyProcess?.write(data); 
-  });
-  socket.on('terminal-restart', ({ shell } = {}) => { spawnShell(shell || 'bash'); });
-  socket.on('disconnect', () => { ptyProcess?.kill(); });
+    yjs.handleUpgrade(req, socket, head, (ws) => yjs.emit('connection', ws, req, docName));
+  } catch {
+    socket.destroy();
+  }
 });
 
 if (require.main === module) {
-  server.listen(5000, () => {
-    console.log(`🚀 Orbit IDE backend online at http://localhost:5000`);
-    console.log(`🤖 AI: ${process.env.GEMINI_API_KEY ? 'Gemini API (primary)' : 'Ollama only'}`);
+  server.listen(config.port, async () => {
+    const [dockerOk, terminal] = await Promise.all([dockerAvailable(), resolveMode()]);
+    console.log(`🚀 Orbit IDE backend on http://localhost:${config.port}`);
+    console.log(`🤖 AI: ${ai.enabled() ? `Claude (${config.claudeModel})` : 'disabled — set ANTHROPIC_API_KEY'}`);
+    console.log(`🐳 Docker: ${dockerOk ? 'connected' : 'not available'} · 🖥  Terminal: ${terminal}`);
+    console.log(`🌐 CORS origins: ${config.corsOrigins.join(', ')}`);
+    cleanupStaleContainers().catch(() => {});
   });
 
-  // Start y-websocket server for real-time collaboration
-  const WebSocket = require('ws');
-  const { setupWSConnection } = require('y-websocket/bin/utils');
-  const wss = new WebSocket.Server({ port: 5001 });
-  wss.on('connection', (conn, req) => {
-    setupWSConnection(conn, req, { docName: req.url.slice(1).split('?')[0] || 'default' });
-  });
-  console.log(`🤝 Real-time Collaboration (y-websocket) online at ws://localhost:5001`);
+  const shutdown = () => {
+    io.close();
+    server.close(() => prisma.$disconnect().finally(() => process.exit(0)));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 module.exports = { app, server };
