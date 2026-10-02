@@ -7,3 +7,6 @@
 		flush_interval -1
 	}
 }
+
+# Other apps on this VM (e.g. AetherMed, GhostOps) drop their sites into /etc/caddy-sites.
+import /etc/caddy/sites/*.caddy
