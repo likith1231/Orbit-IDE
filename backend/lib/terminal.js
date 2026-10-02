@@ -51,6 +51,27 @@ const starting = new Map(); // projectId -> Promise<container>
 
 const containerName = (projectId) => `orbit-term-${projectId}`;
 
+let fallbackUntil = 0;
+async function terminalImage(notify) {
+  if (Date.now() < fallbackUntil) {
+    await ensureImage(config.terminalFallbackImage, notify);
+    return config.terminalFallbackImage;
+  }
+  try {
+    await ensureImage(config.terminalImage, notify);
+    return config.terminalImage;
+  } catch (err) {
+    if (config.terminalImage === config.terminalFallbackImage) throw err;
+    if (!fallbackUntil) {
+      fallbackUntil = Date.now() + 10 * 60 * 1000;
+      console.warn(`Terminal image ${config.terminalImage} unavailable (${err.message}); using ${config.terminalFallbackImage}. Build it with: docker build -t orbit-terminal:latest -f docker/terminal.Dockerfile docker`);
+    }
+    fallbackUntil = Date.now() + 10 * 60 * 1000;
+    await ensureImage(config.terminalFallbackImage, notify);
+    return config.terminalFallbackImage;
+  }
+}
+
 function containerUser() {
   // Run as the backend's own uid so files created in the terminal stay editable by the backend.
   return typeof process.getuid === 'function' && process.getuid() !== 0
@@ -68,12 +89,12 @@ async function getProjectContainer(userId, projectId, notify) {
       throw new Error('Terminal container belongs to another user');
     }
     if (!info) {
-      await ensureImage(config.terminalImage, notify);
+      const image = await terminalImage(notify);
       const dir = await workspace.syncToDisk(projectId);
       const user = containerUser();
       container = await docker.createContainer({
         name,
-        Image: config.terminalImage,
+        Image: image,
         Cmd: ['sleep', 'infinity'],
         WorkingDir: '/workspace',
         User: user,

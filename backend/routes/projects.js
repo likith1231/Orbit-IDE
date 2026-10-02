@@ -1,4 +1,5 @@
 const express = require('express');
+const { spawn } = require('child_process');
 const prisma = require('../db');
 const authMiddleware = require('../middleware/auth');
 const validate = require('../middleware/validate');
@@ -201,6 +202,19 @@ router.post('/:projectId/scaffold', loadProject, validate(scaffoldSchema), wrap(
     }
     touch(projectId);
     res.json({ success: true, files: created });
+}));
+
+// Download the project as a .tar.gz (dependency and build folders excluded).
+router.get('/:projectId/download', loadProject, wrap(async (req, res) => {
+    const dir = await workspace.syncToDisk(req.project.id);
+    const excludes = [...workspace.IGNORED_DIRS].map(d => `--exclude=./${d}`);
+    const safeName = req.project.name.replace(/[^\w.-]+/g, '-') || 'project';
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}.tar.gz"`);
+    const tar = spawn('tar', ['-czf', '-', ...excludes, '-C', dir, '.']);
+    tar.stdout.pipe(res);
+    tar.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.destroy(); });
+    req.on('close', () => tar.kill());
 }));
 
 // Pull changes made on disk (terminal, git, package managers) into the editor.

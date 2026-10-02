@@ -38,6 +38,8 @@ async function ensureImage(image, onProgress) {
     return;
   } catch { /* not present */ }
 
+  // Images we build ourselves (docker/terminal.Dockerfile) can't be pulled from a registry.
+  if (image.startsWith('orbit-')) throw new Error(`image ${image} has not been built`);
   if (pulling.has(image)) return pulling.get(image);
 
   const job = (async () => {

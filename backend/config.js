@@ -38,7 +38,10 @@ module.exports = {
   //   docker — each project gets its own container; safe for multi-user cloud deployments
   //   local  — shell runs on the backend host (node-pty if installed, otherwise a fallback). Dev only.
   terminalMode: process.env.TERMINAL_MODE || 'auto',
-  terminalImage: process.env.TERMINAL_IMAGE || 'node:20-bookworm-slim',
+  // Build orbit-terminal from docker/terminal.Dockerfile (node + python + git + build tools).
+  // If it isn't available, terminals fall back to terminalFallbackImage.
+  terminalImage: process.env.TERMINAL_IMAGE || 'orbit-terminal:latest',
+  terminalFallbackImage: 'node:20-bookworm-slim',
   terminalIdleMinutes: Number(process.env.TERMINAL_IDLE_MINUTES) || 20,
   terminalMemoryMb: Number(process.env.TERMINAL_MEMORY_MB) || 1024,
 
