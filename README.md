@@ -15,6 +15,9 @@ A cloud IDE in the browser: Monaco editor, real terminals, multi-language code e
 - **Collaboration**: open the same file in two browsers and edit together (Yjs).
 - **Chaos testing**: run your code under memory limits, CPU throttling, kills and network cuts and get a resilience score.
 - **One-click deploy**: keep a project running in a container with a shareable URL.
+- **Polished UI** with three themes (Orbit Dark, Midnight, Daylight) that also restyle the editor and terminal. Settings are remembered between visits.
+- **Quick Open** (Ctrl+P) for files, a command palette (Ctrl+Shift+P), toggleable sidebar (Ctrl+B), Markdown preview (Ctrl+Shift+V), and line/column in the status bar.
+- **Run & Debug panel** listing every runnable file, with AI auto-fix and chaos testing.
 - **Project templates**: start from Python, Node + Express, Flask, a static website, C++ or Java.
 - **Clone from GitHub**: "Clone Git Repository" on the welcome screen imports any public repo.
 - Search/replace across files, command palette (Ctrl+Shift+P), go to line, project download (.tar.gz), chat history.

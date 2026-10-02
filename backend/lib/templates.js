@@ -1,5 +1,6 @@
 // Starter files for new projects. Each template is a list of { path, content }.
 const TEMPLATES = {
+  empty: { label: 'Empty', files: [], hidden: true },
   blank: {
     label: 'Blank',
     files: [{ path: 'README.md', content: '# New project\n' }],
@@ -68,6 +69,6 @@ function templateRows(key) {
   return rows;
 }
 
-const templateList = () => Object.entries(TEMPLATES).map(([id, t]) => ({ id, label: t.label }));
+const templateList = () => Object.entries(TEMPLATES).filter(([, t]) => !t.hidden).map(([id, t]) => ({ id, label: t.label }));
 
 module.exports = { templateRows, templateList };

@@ -36,13 +36,14 @@ test('Core flow: Signup, IDE usage, Run, Logout, Persistence', async ({ page }) 
   await expect(savedIndicator).toBeVisible({ timeout: 15000 });
 
   // Click the run button at the top header
-  await page.locator('button.run-btn').filter({ hasText: 'Run' }).first().click();
+  await page.locator('.titlebar .btn-run').click();
   
   // Program output is shown in the Run tab of the terminal panel.
   const runOutput = page.locator('.terminal-host:visible .xterm-rows');
   await expect(runOutput.first()).toContainText('Hello from Playwright', { timeout: 60000 });
 
-  await page.click('.logout-btn');
+  await page.click('.avatar');
+  await page.click('.menu-item:has-text("Log out")');
   await expect(page).toHaveURL(/\/login/);
 
   await page.fill('input[type="email"]', testEmail);
