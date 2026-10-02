@@ -8,6 +8,7 @@
 #   SSH_KEY=~/.ssh/oracle.key        private key from the console (its public half is put on the VM)
 #   SUBNET_NAME="public subnet-orbitvcn"
 #   BOOT_GB=100  NAME=orbit  WAIT=120 (seconds between rounds)
+#   NTFY_TOPIC=my-secret-topic        also send a phone notification via the free ntfy app (ntfy.sh)
 set -uo pipefail
 
 SIZES=${SIZES:-"4:24 2:12 1:6"}
@@ -109,4 +110,6 @@ say "Your Oracle VM is running."
 echo "    Public IP:  $IP"
 echo "    Connect:    ssh -i $SSH_KEY ubuntu@$IP"
 command -v notify-send >/dev/null && notify-send "Oracle VM ready" "Public IP: $IP" 2>/dev/null
+[ -n "${NTFY_TOPIC:-}" ] && curl -fsS -H "Title: Oracle VM ready" -d "Public IP: $IP" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
+echo "Oracle VM ready. Public IP: $IP" > "$HOME/oracle-vm-ready.txt"
 exit 0
