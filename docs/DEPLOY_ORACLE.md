@@ -108,6 +108,20 @@ sed -i 's/^SIGNUP_ENABLED=.*/SIGNUP_ENABLED=false/' .env
 docker compose up -d
 ```
 
+## 8. More apps on the same VM (optional)
+
+The VM's Caddy also serves any site file placed in `/etc/caddy-sites/`, so other projects can share
+ports 80/443 and get their own HTTPS hostnames. [GhostOps](https://github.com/likith1231/ghostops)
+and [AetherMed](https://github.com/likith1231/Aethermed) each ship a `deploy/oracle/setup.sh` that
+installs k3s (Kubernetes) next to Orbit and publishes:
+
+| App | URL |
+|---|---|
+| AetherMed | `https://aethermed.<DOMAIN>` |
+| GhostOps Grafana / API | `https://grafana.<DOMAIN>`, `https://ghostops.<DOMAIN>` |
+
+Run Orbit first (it owns Caddy), then each project's script from its own checkout.
+
 ---
 
 ## Day-2 operations

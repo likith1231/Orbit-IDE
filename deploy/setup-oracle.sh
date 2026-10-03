@@ -44,8 +44,10 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now orbit-block-metadata.service
 
-echo "==> Creating data directory"
+echo "==> Creating data directories"
 mkdir -p /var/lib/orbit
+# Sites for other apps on this VM, served by the same Caddy (see deploy/Caddyfile).
+mkdir -p /etc/caddy-sites
 
 echo
 echo "Done. Next steps (see docs/DEPLOY_ORACLE.md):"
