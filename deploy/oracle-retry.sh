@@ -7,7 +7,7 @@
 #   SIZES="4:24 2:12 1:6"            OCPU:GB sizes to try each round, biggest first
 #   SSH_KEY=~/.ssh/oracle.key        private key from the console (its public half is put on the VM)
 #   SUBNET_NAME="public subnet-orbitvcn"
-#   BOOT_GB=100  NAME=orbit  WAIT=120 (seconds between rounds)
+#   BOOT_GB=100  NAME=orbit  WAIT=120 (seconds between rounds)  GAP=60 (seconds between attempts)
 #   NTFY_TOPIC=my-secret-topic        also send a phone notification via the free ntfy app (ntfy.sh)
 set -uo pipefail
 
@@ -17,6 +17,8 @@ SUBNET_NAME=${SUBNET_NAME:-"public subnet-orbitvcn"}
 BOOT_GB=${BOOT_GB:-100}
 NAME=${NAME:-orbit}
 WAIT=${WAIT:-120}
+# Oracle rate-limits instance launches; attempts closer than ~1 minute apart get 429s.
+GAP=${GAP:-60}
 SHAPE=VM.Standard.A1.Flex
 
 say() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -94,7 +96,7 @@ $out"
           die "Oracle rejected the request:
 $out"
         fi
-        sleep 20
+        sleep "$GAP"
       done
     done
     [ -n "$INSTANCE" ] || { say "No capacity yet. Next round in $WAIT s."; sleep "$WAIT"; }
