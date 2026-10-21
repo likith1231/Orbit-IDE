@@ -118,9 +118,24 @@ installs k3s (Kubernetes) next to Orbit and publishes:
 | App | URL |
 |---|---|
 | AetherMed | `https://aethermed.<DOMAIN>` |
-| GhostOps Grafana / API | `https://grafana.<DOMAIN>`, `https://ghostops.<DOMAIN>` |
+| GhostOps website / public API / Grafana | `https://ghostops.<DOMAIN>`, `https://api-ghostops.<DOMAIN>`, `https://grafana.<DOMAIN>` |
 
 Run Orbit first (it owns Caddy), then each project's script from its own checkout.
+
+**Already running a system Caddy?** GhostOps's `deploy/oracle/bootstrap.sh` installs Caddy as a system service
+on ports 80/443, and a second Caddy (Orbit's container) cannot bind them. In that case start only the other
+services and give Orbit a site file instead of its Caddy container:
+
+```bash
+docker compose up -d --build db backend terminal-image
+sudo tee /etc/caddy-sites/orbit.caddy >/dev/null <<EOF
+orbit.<IP-with-dashes>.sslip.io {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:5000 { flush_interval -1 }
+}
+EOF
+sudo systemctl reload caddy
+```
 
 ---
 
@@ -144,5 +159,6 @@ Project files live in Postgres. The on-disk copies used by terminals are in `/va
 - **Frontend says "Could not reach the backend" / CORS errors**: `CORS_ORIGINS` must exactly match the frontend origin (scheme + host, no trailing slash). Restart after changing it.
 - **Terminal says Docker is not available**: `docker compose exec backend ls -l /var/run/docker.sock` should list the socket.
 - **Terminal has no `python3`/`git`**: the `orbit-terminal` image wasn't built. Run `docker compose build terminal-image`. Until it's built, terminals use plain `node:20-bookworm-slim`.
+- **`docker compose build` fails at `apt-get update` (or containers cannot resolve names)**: Docker is using the VCN resolver at `169.254.169.254`, which `setup-oracle.sh` blocks for containers on purpose. `setup-oracle.sh` now writes `/etc/docker/daemon.json` with public DNS; on an older setup run `echo '{"dns": ["1.1.1.1", "8.8.8.8"]}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker`.
 - **Docker Hub "too many requests"**: add `DOCKER_IMAGE_MIRROR=mirror.gcr.io` to `.env` and run `docker compose up -d`.
 - **Arm (Ampere) compatibility**: all default language images are multi-arch and run natively on A1.
