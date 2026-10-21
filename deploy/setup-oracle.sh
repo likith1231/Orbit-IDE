@@ -13,6 +13,18 @@ systemctl enable --now docker
 # Let the login user run docker without sudo (takes effect on next login).
 if [ -n "${SUDO_USER:-}" ]; then usermod -aG docker "$SUDO_USER"; fi
 
+echo "==> Giving Docker public DNS servers"
+# On Oracle, containers default to the VCN resolver at 169.254.169.254 - the metadata address that the
+# step below blocks for user containers. Without this, image builds fail at "apt-get update".
+if ! grep -qs '"dns"' /etc/docker/daemon.json; then
+  if [ -s /etc/docker/daemon.json ]; then
+    echo "   /etc/docker/daemon.json exists without a dns setting; add \"dns\": [\"1.1.1.1\", \"8.8.8.8\"] to it yourself"
+  else
+    echo '{"dns": ["1.1.1.1", "8.8.8.8"]}' > /etc/docker/daemon.json
+    systemctl restart docker
+  fi
+fi
+
 echo "==> Opening ports 80 and 443 in the VM firewall"
 # Oracle's Ubuntu images ship iptables rules that reject everything except SSH,
 # even after you open ports in the cloud console. Insert ACCEPT rules before the REJECT.
