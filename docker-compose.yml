@@ -35,7 +35,7 @@ services:
       DATABASE_URL: postgresql://orbit:${POSTGRES_PASSWORD}@127.0.0.1:5432/orbit
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5-5}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
       CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env}
       SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
       DOCKER_IMAGE_MIRROR: ${DOCKER_IMAGE_MIRROR:-}

@@ -55,7 +55,8 @@ module.exports = {
 
   // CLAUDE_API_KEY is accepted as an alias because it's an easy name to reach for.
   anthropicApiKey: (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '').trim(),
-  claudeModel: process.env.CLAUDE_MODEL || 'claude-opus-5-5',
+  // Orbit's agent is restricted to Haiku (see MODELS in lib/ai.js); a non-Haiku value here is ignored.
+  claudeModel: process.env.CLAUDE_MODEL || 'claude-haiku-5-5',
   // Used for latency-sensitive inline autocomplete only.
   claudeFastModel: process.env.CLAUDE_FAST_MODEL || 'claude-haiku-4-5',
   ollamaUrl: process.env.OLLAMA_URL || '',

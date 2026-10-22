@@ -14,14 +14,12 @@ const MAX_VERIFY_ATTEMPTS = 3;
 
 const client = config.anthropicApiKey ? new Anthropic({ apiKey: config.anthropicApiKey }) : null;
 
+// Haiku only: Orbit's agent runs on the low-cost model. Anything else a browser asks for (an old tab that saved
+// Opus or Sonnet, or a hand-made request) is replaced by this list's model, and the picker shows only Haiku.
 const MODELS = [
-  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', sub: 'Most capable (default)' },
-  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', sub: 'Fast and capable' },
-  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', sub: 'Fastest, cheapest' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', sub: 'Fast and low-cost' },
 ];
 const MODEL_IDS = new Set(MODELS.map(m => m.id));
-// Server-side refusal fallback is supported on these; see sendStream().
-const FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5']);
 
 const PROJECT_CONTEXT_CHAR_BUDGET = 400_000;
 
@@ -120,7 +118,9 @@ function friendlyError(err) {
   return new AIError(err?.message || 'AI request failed');
 }
 
-const pickModel = (m) => (MODEL_IDS.has(m) ? m : config.claudeModel);
+// CLAUDE_MODEL may name another model (an older .env said Sonnet); only a model on the list above is ever used.
+const CHAT_MODEL = MODEL_IDS.has(config.claudeModel) ? config.claudeModel : MODELS[0].id;
+const pickModel = (m) => (MODEL_IDS.has(m) ? m : CHAT_MODEL);
 
 // Request knobs that differ per model family.
 function modelParams(model, effort) {
@@ -190,11 +190,6 @@ function collectActions(message) {
 async function sendStream(params, { onText, signal } = {}) {
   const anthropic = ensureClient();
   const request = { ...params };
-  if (FALLBACK_MODELS.has(params.model)) {
-    // If a safety classifier declines, let the API retry on a suitable fallback model.
-    request.betas = ['server-side-fallback-2026-07-01'];
-    request.fallbacks = 'default';
-  }
   // Tool inputs stream unvalidated (eager_input_streaming), so a malformed one can make the
   // SDK throw a JSON error. Retry those (only those) a couple of times.
   for (let attempt = 0; ; attempt++) {
@@ -329,9 +324,9 @@ async function verifyProject({ files, runPath, signal, userId }) {
 /** Fix code given a real error from the sandbox. Resolves with { changes, explanation }. */
 async function debug({ files, file, language, error }) {
   const message = await sendStream({
-    model: config.claudeModel,
+    model: CHAT_MODEL,
     max_tokens: 32000,
-    ...modelParams(config.claudeModel, 'medium'),
+    ...modelParams(CHAT_MODEL, 'medium'),
     system: [
       { type: 'text', text: SYSTEM_INSTRUCTIONS },
       { type: 'text', text: projectSnapshot(files, file.path), cache_control: { type: 'ephemeral' } },
@@ -364,4 +359,4 @@ async function autocomplete({ prefix, suffix, language, signal }) {
   return text;
 }
 
-module.exports = { chat, debug, autocomplete, verifyProject, friendlyError, AIError, MODELS, enabled: () => !!client };
+module.exports = { chat, debug, autocomplete, verifyProject, friendlyError, AIError, MODELS, pickModel, enabled: () => !!client };

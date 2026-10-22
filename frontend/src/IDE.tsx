@@ -346,7 +346,7 @@ export default function IDE() {
   const [activityPanel, setActivityPanel] = useState<'explorer' | 'search' | 'source' | 'debug' | 'docker' | 'extensions' | 'settings'>('explorer');
   const [bottomTab, setBottomTab] = useState<'terminal' | 'problems' | 'output' | 'chaos'>('terminal');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('orbit_model') || 'claude-opus-5-5');
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('orbit_model') || 'claude-haiku-5-5');
   const [aiModels, setAiModels] = useState<{ id: string; label: string; sub: string }[]>([]);
   const [aiEnabled, setAiEnabled] = useState(true);
   const [backendIssue, setBackendIssue] = useState<null | 'unreachable' | 'outdated' | 'db' | 'ai'>(null);
