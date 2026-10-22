@@ -88,7 +88,7 @@ flowchart LR
 - **Auto-debug** a failed run from its real error
 - <kbd>Ctrl</kbd>+<kbd>I</kbd> on a selection: explain, fix, write tests, add docs
 - Inline **autocomplete**
-- Choose Opus 5.5, Sonnet 5.5 or Haiku 4.5
+- Runs on Claude Haiku 5.5, the fast, low-cost model
 - Saved chat history per project
 
 </td>
@@ -242,7 +242,7 @@ All backend settings live in `backend/.env`. Restart the backend after changing 
 | `DATABASE_URL` | — | PostgreSQL connection string **(required)** |
 | `JWT_SECRET` | dev secret | Signs login tokens. **Set this in production** |
 | `ANTHROPIC_API_KEY` | — | Claude API key (`CLAUDE_API_KEY` also works) |
-| `CLAUDE_MODEL` | `claude-opus-5-5` | Default chat model (users can switch in the chat panel) |
+| `CLAUDE_MODEL` | `claude-haiku-5-5` | Chat model. Orbit's agent is restricted to Haiku; any other value is ignored |
 | `CLAUDE_FAST_MODEL` | `claude-haiku-4-5` | Inline autocomplete model |
 | `CORS_ORIGINS` | localhost + Vercel app | Comma-separated allowed frontend origins |
 | `SIGNUP_ENABLED` | `true` | Set `false` once your account exists |
